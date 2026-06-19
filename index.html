@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-store">
 <title>VOICE CONDUCTOR</title>
 <style>
   :root{
@@ -144,17 +145,16 @@ const CONFIG = {
 
   // ---- LeftHand — 4 gestures, split apart by velocity (the misfire crux) ----
   leftHand:{
-    zoneW: 0.45,           // gesture area: left this fraction of the width…
+    zoneW: 0.125,          // gesture area: left this fraction of the width (a thin strip)…
     zoneTop: 0.50,         // …and below this fraction of the height (bottom-left)
     AXIS_RATIO: 1.3,       // how decisively vertical-vs-horizontal a stroke must be
     TEMP_SENSITIVITY: 3.75,// screen-fraction dragged → temperature delta (~2 drags = full range)
-    FLICK_VEL: 0.85,       // px/ms peak speed at or above which a stroke is a flick…
+    FLICK_VEL: 1.2,        // px/ms peak speed at or above which a stroke is a flick…
     FLICK_MAX_MS: 360,     // …only if the whole contact was this brief…
     FLICK_MIN_DISP: 30,    // …and travelled at least this far vertically (px)
     HOLD_MS: 280,          // near-still contact this long → hold (間)
     HOLD_DRIFT: 16,        // px of wander still counted as "holding"
     HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → progression swipe
-    dropBars: 1,           // down-flick: the band pulls back this many bars
   },
 
   // ---- placeholder for phase 4 ----
@@ -222,7 +222,6 @@ const midiName  = m=>NOTE_NAMES[((m%12)+12)%12]+(Math.floor(m/12)-1);   // 60 �
 let temperature=0.35;   // left-hand vertical swipe — band heat 0..1
 let suspended=false;    // left-hand hold — the band holds its breath (間)
 let pendingProg=null;   // left-hand horizontal swipe — progression queued to next phrase
-let dropUntilBeat=0;    // left-hand down-flick — band pulls back until this beat
 
 /* ================================================================
    AUDIO ENGINE — master bus, compressor, lush reverb, motif delay.
@@ -415,6 +414,26 @@ function crash(t,vel){
   env.gain.exponentialRampToValueAtTime(0.0001,t+1.3);
   s.connect(hp);hp.connect(env);env.connect(bandDry);env.connect(bandRev);
 }
+function tom(t,vel,freq){
+  // a fat tom — pitch dropping sine with a little skin-noise body. Used for the
+  // drop fill (ドロップ), where the cymbals fall away and the toms take over.
+  const o=AC.createOscillator();o.type='sine';
+  o.frequency.setValueAtTime(freq,t);
+  o.frequency.exponentialRampToValueAtTime(freq*0.6,t+0.18);
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.5,t+0.006);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.32);
+  o.connect(env);env.connect(bandDry);env.connect(bandRev);
+  const s=noiseSrc(t,0.12);                                 // the head's body
+  const lp=AC.createBiquadFilter();lp.type='lowpass';lp.frequency.value=freq*4;
+  const ne=AC.createGain();
+  ne.gain.setValueAtTime(0.0001,t);
+  ne.gain.exponentialRampToValueAtTime(vel*0.18,t+0.005);
+  ne.gain.exponentialRampToValueAtTime(0.0001,t+0.12);
+  s.connect(lp);lp.connect(ne);ne.connect(bandDry);
+  o.start(t);o.stop(t+0.34);
+}
 function kick(t,vel){
   const o=AC.createOscillator();o.type='sine';
   o.frequency.setValueAtTime(92,t);
@@ -493,15 +512,14 @@ function bassNoteFor(b){
   return bassCur;
 }
 
-/* is the band sounding right now? The left hand can hush it: a hold
-   (間) suspends it, a down-flick (ドロップ) pulls it back for a bar.
-   The lead and the chord pad keep going regardless. */
-function bandPlaying(){ return !suspended && Transport.beat>=dropUntilBeat; }
+/* hold (間) → suspended: the band falls silent, only lead + pad + reverb.
+   (The down-flick / ドロップ is now a one-shot tom, handled in fireDrop.) */
+function bandPlaying(){ return !suspended; }
 
 /* one beat of the trio, all events placed relative to beat time t.
    `temperature` (left-hand vertical swipe) heats the density up & down. */
 function scheduleBeat(t,beatInBar){
-  if(!bandPlaying()) return;
+  if(suspended) return;                                     // 間 — total hush
   const b=beatInBar;
   const BEAT=Transport.beatDur;
   const off=BEAT*CONFIG.swing;                            // the swung "and"
@@ -621,9 +639,9 @@ function createLeadVoice(midi,x01){
   const o2=AC.createOscillator(); o2.type='sawtooth';
   o1.frequency.value=f; o2.frequency.value=f;
   o1.detune.value=3; o2.detune.value=-4;
-  const g2=AC.createGain(); g2.gain.value=lerp(0.08,0.55,x01);   // edge from articulation
+  const g2=AC.createGain(); g2.gain.value=lerp(0.08,0.45,x01);   // edge from position
   const flt=AC.createBiquadFilter(); flt.type='lowpass'; flt.Q.value=1.0;
-  flt.frequency.value=lerp(900,4200,x01);
+  flt.frequency.value=lerp(900,3800,x01);
   const env=AC.createGain();
   env.gain.setValueAtTime(0.0001,t);
   env.gain.exponentialRampToValueAtTime(0.22,t+CONFIG.leadAttack);
@@ -696,11 +714,15 @@ function leadMove(e){
     if(leap){ rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi); }
     else glideLeadTo(lead.voice,midi);
   }
-  // horizontal motion = articulation: open vibrato & brightness
+  // timbre follows horizontal POSITION (left = round/dark, right = bright/edgy),
+  // so a slide carries the same left↔right expression as a tap. Horizontal SPEED
+  // then adds articulation on top: extra brightness push + vibrato.
   const t=AC.currentTime;
   const artic=clamp(lead.hSpeed*1.6,0,1);
+  const bright=clamp(x01*0.8+artic*0.4,0,1);
+  lead.voice.g2.gain.setTargetAtTime(lerp(0.08,0.45,x01),t,0.05);     // saw edge ← position
+  lead.voice.flt.frequency.setTargetAtTime(lerp(900,4600,bright),t,0.05);
   lead.voice.lfoGain.gain.setTargetAtTime(artic*CONFIG.leadVibratoMaxCents,t,0.08);
-  lead.voice.flt.frequency.setTargetAtTime(lerp(900,5200,artic),t,0.05);
   pushTrail(e.clientX,e.clientY);
 }
 function leadUp(e){
@@ -821,35 +843,23 @@ function leftUp(e){
 /* ---- gesture effects (the band's full interpretation arrives in phase 4) ---- */
 function queueProgression(dir){
   const n=PROGRESSIONS.length;
-  pendingProg=((progIdx+dir)%n+n)%n;
-  confirmTick();                                           // a soft rising shimmer = "received"
+  pendingProg=((progIdx+dir)%n+n)%n;                        // received silently (bottom-edge indicator only)
   dbg('SWIPE '+(dir>0?'▶':'◀')+' → '+PROGRESSIONS[pendingProg].name);
 }
 function fireKime(){
   if(!AC) return;
   const t=AC.currentTime+0.02;                             // immediate one-shot — responsiveness over the grid
-  crash(t,1); kick(t,0.7); snare(t,0.75); comp(chord,t,1);
-  flash.kind='kime'; flash.a=0.5;
+  crash(t,0.7); kick(t,0.7); snare(t,0.75); comp(chord,t,1);
+  flash.kind='kime'; flash.a=0.38;
   dbg('FLICK ▲ → KIME');
 }
 function fireDrop(){
-  dropUntilBeat=Transport.beat+CONFIG.beatsPerBar*C.dropBars; // band pulls back, lead left alone
-  flash.kind='drop'; flash.a=0.4;
+  if(!AC) return;
+  const t=AC.currentTime+0.02;          // a punchy one-shot — floor-tom + kick + snare together
+  tom(t,1,95); kick(t,0.9); snare(t,0.7);
+  flash.kind='drop'; flash.a=0.3;
   dbg('FLICK ▼ → DROP');
 }
-function confirmTick(){
-  if(!AC) return;
-  const t=AC.currentTime+0.01;
-  const o=AC.createOscillator(); o.type='sine';
-  o.frequency.setValueAtTime(740,t); o.frequency.exponentialRampToValueAtTime(1180,t+0.16);
-  const env=AC.createGain();
-  env.gain.setValueAtTime(0.0001,t);
-  env.gain.exponentialRampToValueAtTime(0.045,t+0.02);
-  env.gain.exponentialRampToValueAtTime(0.0001,t+0.24);
-  o.connect(env); env.connect(bandRev); env.connect(bandDry);
-  o.start(t); o.stop(t+0.28);
-}
-
 /* ================================================================
    VISUALS (phase-1 minimal) — a dark room that breathes with the
    chord tension and blooms softly on every beat, so you can see the
@@ -968,11 +978,10 @@ function frame(){
 
   // debug HUD — last gesture + the resulting state it changed
   if(CONFIG.debug && dbgEl){
-    const dropOn = AC && Transport.beat<dropUntilBeat;
     const leadNote = lastLeadMidi!==null ? midiName(lastLeadMidi) : '—';
     dbgEl.textContent =
       '▸ '+dbgAction+'\n'+
-      'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+(dropOn?'  DROP':'')+'\n'+
+      'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+'\n'+
       'prog '+PROGRESSIONS[progIdx].name+'\n'+
       'chord '+chord.name+'\n'+
       'lead '+leadNote+'  i'+leadIntensity.toFixed(2);
