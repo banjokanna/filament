@@ -176,6 +176,8 @@ const CONFIG = {
     HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → progression swipe
     TAP_MAX_MS: 200,       // a quick, near-still touch (no flick/hold/drag) → a comp stab
     TAP_MAX_DISP: 20,      // …with at most this much travel
+    breakCut: 'cymbals',   // down-flick BREAK drops this until the next bar downbeat (小節頭):
+                           //   'cymbals' (ride+hat, pulse continues — gentle) | 'drumsbass' (whole groove)
   },
 
   // ---- BandBrain — reaction / interpretation / deviation (decided each bar) ----
@@ -265,6 +267,8 @@ const midiName  = m=>NOTE_NAMES[((m%12)+12)%12]+(Math.floor(m/12)-1);   // 60 �
 let temperature=0.44;   // left-hand vertical swipe — band heat 0..1 (rests here when idle)
 let suspended=false;    // left-hand hold — the band holds its breath (間)
 let pendingProg=null;   // left-hand horizontal swipe — progression queued to next phrase
+let cutActive=false;    // left-hand down-flick — a BREAK: stop SCHEDULING the dropped instruments
+let cutUntilBeat=0;     // …until this beat (next 小節頭). Sounds already ringing decay naturally.
 
 /* ================================================================
    AUDIO ENGINE — master bus, compressor, lush reverb, motif delay.
@@ -557,34 +561,40 @@ function bassNoteFor(b){
   return bassCur;
 }
 
-/* hold (間) → suspended: the band falls silent, only lead + pad + reverb.
-   (The down-flick / ドロップ is now a one-shot tom, handled in fireDrop.) */
+/* the band is silent only during a hold (間). A break drops just some instruments
+   (handled per-instrument), so comping/harmony keep going through it. */
 function bandPlaying(){ return !suspended; }
 
 /* one beat of the trio. The BandBrain's energy chooses the GROOVE CHARACTER:
    low → half-time feel, mid → swing, high → burning (bombs/fills/triplets). */
 function scheduleBeat(t,beatInBar){
-  if(suspended) return;                                     // 間 — total hush
+  if(suspended) return;                                     // 間 (hold) — full hush
+  // during a BREAK, stop SCHEDULING the dropped instruments — but anything already
+  // ringing keeps decaying naturally (we don't touch live notes)
+  if(cutActive && CONFIG.leftHand.breakCut==='drumsbass') return;   // drop drums & bass
+  const cym = cutActive && CONFIG.leftHand.breakCut==='cymbals';    // drop ride+hat
   const E=BandBrain.effDrive, G=CONFIG.groove;
   const band = E<G.halfTimeBelow ? 'half' : (E>G.burningAbove ? 'burn' : 'swing');
-  if(band==='half') drumsHalfTime(t,beatInBar);
-  else drumsSwing(t,beatInBar,band);
+  if(band==='half') drumsHalfTime(t,beatInBar,cym);
+  else drumsSwing(t,beatInBar,band,cym);
   scheduleBass(t,beatInBar,band);
 }
 
 /* SWING (mid) & BURNING (high) drums. Densities/dynamics open with energy; in the
    burning band the kit also drops "bombs" and throws an occasional fill. */
-function drumsSwing(t,b,band){
+function drumsSwing(t,b,band,cym){
   const BEAT=Transport.beatDur, off=BEAT*CONFIG.swing, j=()=>t+rand(-0.006,0.006);
   const backbeat=(b===1||b===3);
   const P=BandBrain.parts, E=P.drums;
   const more=v=>clamp(v*(0.2+1.8*E),0,1);
   const acc=lerp(0.72,1.18,P.accent);
 
-  if(Math.random()<0.97) ride(j(),(backbeat?0.9:0.66)*acc,P.legato);
-  const skip = backbeat ? CONFIG.rideSkipProb*lerp(0.4,1,E) : lerp(0,0.7,E);
-  if(Math.random()<skip) ride(t+off+rand(-0.006,0.006),0.45*acc,P.legato);
-  if(backbeat) hat(j(),acc);
+  if(!cym){                                                 // cymbals not scheduled during a 'cymbals' break
+    if(Math.random()<0.97) ride(j(),(backbeat?0.9:0.66)*acc,P.legato);
+    const skip = backbeat ? CONFIG.rideSkipProb*lerp(0.4,1,E) : lerp(0,0.7,E);
+    if(Math.random()<skip) ride(t+off+rand(-0.006,0.006),0.45*acc,P.legato);
+    if(backbeat) hat(j(),acc);
+  }
   if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22)*acc);
   if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6)*acc);
   if(b===0&&Math.random()<CONFIG.featherKickProb*lerp(0.7,1.4,E)) kick(j(),0.16);
@@ -598,18 +608,18 @@ function drumsSwing(t,b,band){
     if(Math.random()<G.burnBombProb*r) (Math.random()<0.5?kick:snare)(t+BEAT*2/3+rand(-0.005,0.005),rand(0.5,0.85));
     if(Math.random()<G.burnBombProb*0.7*r) snare(t+BEAT/3,rand(0.4,0.65));
     if(Math.random()<G.burnBombProb*0.5*r) kick(t+BEAT/3,rand(0.3,0.5));
-    if(Math.random()<G.burnBombProb*0.4*r) ride(t+BEAT/3,0.5,P.legato);   // splashy off-beat accents
+    if(!cym && Math.random()<G.burnBombProb*0.4*r) ride(t+BEAT/3,0.5,P.legato);   // splashy off-beat accents
     if(b===CONFIG.beatsPerBar-1 && Math.random()<G.burnFillProb*r) drumFill(t);
   }
 }
 
 /* HALF-TIME (low) — spacious: soft ride on quarters, the backbeat moved to beat 3
    only, a soft kick on 1. Reads as "twice as slow" though the tempo holds. */
-function drumsHalfTime(t,b){
+function drumsHalfTime(t,b,cym){
   const j=()=>t+rand(-0.006,0.006);
   const acc=lerp(0.55,0.85,BandBrain.parts.accent);
   const back=(b===1||b===3);                                     // beats 2 & 4
-  if(back){ ride(j(),0.6*acc,0.85); hat(j(),0.55*acc); }         // cymbals ONLY on 2 & 4 — very open
+  if(back && !cym){ ride(j(),0.6*acc,0.85); hat(j(),0.55*acc); } // cymbals on 2 & 4 (skipped during a break)
   if(b===2) snare(j(),0.5*acc);                                  // soft half-time backbeat on 3
   if(b===0 && Math.random()<0.55) kick(j(),0.18);               // soft kick on 1
   if(Math.random()<0.04) snare(t+Transport.beatDur*CONFIG.swing,0.12); // a rare brushed ghost
@@ -766,6 +776,9 @@ const Transport = {
       const t=this.nextBeatTime, b=this.beat;
       const beatInBar=b%CONFIG.beatsPerBar;
       const bar=Math.floor(b/CONFIG.beatsPerBar);
+
+      // a break ends on the next bar downbeat (小節頭) — resume scheduling the instruments
+      if(cutActive && b>=cutUntilBeat){ cutActive=false; cutUntilBeat=0; }
 
       if(beatInBar===0) this.onBar(t,bar);
       this.onBeat(t,beatInBar,bar);
@@ -1184,7 +1197,7 @@ function leftUp(e){
                  && disp>=C.FLICK_MIN_DISP && disp<=C.FLICK_MAX_DISP;
     if(isFlick){
       temperature=left.tempStart;                          // a flick never changes temperature
-      if(left.sumY<0) fireHit(); else fireDrop();          // up-ish = hit, down-ish = drop (any direction)
+      if(left.sumY<0) fireHit(); else fireBreak();         // up-ish = hit, down-ish = break (any direction)
     }else if(contact<=C.TAP_MAX_MS && left.maxDisp<C.TAP_MAX_DISP){
       temperature=left.tempStart;                          // a tap isn't a temperature change
       firePunch();                                         // a quick, repeatable tom/kick punch
@@ -1207,9 +1220,16 @@ function fireHit(){
   flash.kind='hit'; flash.a=0.30;
   dbg('FLICK ▲ → HIT');
 }
-function fireDrop(){
-  // left DOWN-flick — its old tom/kick punch has moved to the tap; awaiting a new role
-  dbg('FLICK ▼ → (free)');
+function fireBreak(){
+  // left DOWN-flick — a BREAK: stop scheduling the dropped instruments (cymbals, or the
+  // whole groove) until the next bar downbeat (小節頭). Notes already ringing at the moment
+  // of the flick are left to decay naturally; only NEW hits are withheld.
+  if(!AC || cutActive) return;
+  const bpb=CONFIG.beatsPerBar;
+  cutUntilBeat=(Math.floor(Transport.beat/bpb)+1)*bpb;    // resume on the next 小節頭
+  cutActive=true;
+  flash.kind='cut'; flash.a=0.32;
+  dbg('FLICK ▼ → BREAK');
 }
 function firePunch(){
   if(!AC) return;
@@ -1346,9 +1366,9 @@ function frame(){
   // discrete event flash — a warm lift for a HIT, a cool lift for a DROP
   if(flash.a>0.01){
     flash.a*=0.9;
-    cx.fillStyle = flash.kind==='hit'
-      ? `rgba(255,232,184,${flash.a})`
-      : `rgba(150,210,235,${flash.a})`;    // pale cyan — a cool lift, in the app's blue accent tone
+    cx.fillStyle = flash.kind==='hit'  ? `rgba(255,232,184,${flash.a})`   // warm lift (HIT)
+                 : flash.kind==='cut'  ? `rgba(2,3,10,${flash.a*0.9})`    // dark sink (BREAK)
+                 : `rgba(150,210,235,${flash.a})`;                        // pale cyan (tap PUNCH)
     cx.fillRect(0,0,W,H);
   }
 
