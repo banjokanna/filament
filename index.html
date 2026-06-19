@@ -141,14 +141,15 @@ const CONFIG = {
   // ---- right-hand FLICK — a deliberate fast flick plays a chromatic OUTSIDE figure ----
   rightFlick:{
     enabled: true,
-    mode: 'approach',     // 'enclosure' (3-note wrap) | 'approach' (1 out note + resolve)
+    mode: 'single',       // 'enclosure' (3-note wrap) | 'approach' (1 out + resolve) | 'single' (1 out, held)
     runVel: 2.8,          // px/ms — a hard vertical flick (well above normal play)
     minDisp: 45,          // …and it must travel at least this far vertically from touchdown
                           //    (rejects the spurious velocity spike of the very first move)
     windowMs: 160,        // …but only if it's fast from the START of the touch (not mid-swipe)
-    cooldownMs: 260,      // one flick at a time; also suppresses the rapid-rearticulation choke
+    cooldownMs: 340,      // one flick at a time; also suppresses the rapid-rearticulation choke
+                          //    (covers the enclosure's two beat/3 steps before normal play resumes)
     outMs: 120,           // approach: how long the out note holds before resolving inward
-    encStepMs: 110,       // enclosure: time per note
+                          // enclosure: notes are spaced as an eighth-note triplet (beat/3)
     intensityKick: 0.85,  // leadIntensity floor on a flick (so the band bites)
   },
 
@@ -176,11 +177,25 @@ const CONFIG = {
   bandBrain:{
     tempWeight: 0.80,     // how much the temperature dial drives band energy
     leadWeight: 0.70,     // how much the soloist's own intensity drives it (reaction)
+    restTemp: 0.44,       // temperature drifts home to this when the left hand is idle
+                          //    (→ band rests at ~0.35, not stuck loud after a push)
+    tempReturn: 0.005,    // per-frame ease of that drift home
     suddenSpan: 0.22,     // a target jump this big counts as fully "sudden"
-    easeSlow: 0.10,       // a gradual change → lazy, teasing response
+    easeSlow: 0.14,       // a gradual change → lazy, teasing response
     easeFast: 0.55,       // a sudden change → the band jumps with you
+    minApproach: 0.06,    // minimum energy step per bar toward target (the tail no longer crawls)
     deviationProb: 0.12,  // chance, per phrase, the band deliberately diverges
     cooldownBars: 4,      // bars before another deviation may fire
+  },
+
+  // ---- groove bands — the drums/bass change CHARACTER (not just density) by energy ----
+  groove:{
+    halfTimeBelow: 0.18,        // effDrive below this → a spacious HALF-TIME feel
+    burningAbove:  0.80,        // effDrive above this → BURNING (ramps 0→full from here to 1.0)
+    bassTripletProb: 0.22,      // burn: chance per beat of a 1-beat (eighth-note) triplet
+    bass2beatTripletProb: 0.12, // burn: chance (on beats 1 & 3) of a 2-beat triplet
+    burnBombProb: 0.50,         // burn: off-beat kick/snare "bombs"
+    burnFillProb: 0.45,         // burn: a short fill on the last beat of the bar
   },
 };
 
@@ -242,7 +257,7 @@ const midiName  = m=>NOTE_NAMES[((m%12)+12)%12]+(Math.floor(m/12)-1);   // 60 �
    leadIntensity (declared with the audio engine) is the fourth. The
    BandBrain (phase 4) will read all of these; for now they drive the band
    directly so the left hand is testable. */
-let temperature=0.35;   // left-hand vertical swipe — band heat 0..1
+let temperature=0.44;   // left-hand vertical swipe — band heat 0..1 (rests here when idle)
 let suspended=false;    // left-hand hold — the band holds its breath (間)
 let pendingProg=null;   // left-hand horizontal swipe — progression queued to next phrase
 
@@ -381,6 +396,7 @@ function advanceChord(when){
    absolute AudioContext time handed down by the Transport.
    ================================================================ */
 let bassCur=36;
+let bassBusyBeat=0;   // a multi-beat bass figure (2-beat triplet) occupies beats until here
 
 function ride(t,vel,legato=0){
   // brushes on the ride: a soft dark wash, no hard stick attack.
@@ -540,45 +556,110 @@ function bassNoteFor(b){
    (The down-flick / ドロップ is now a one-shot tom, handled in fireDrop.) */
 function bandPlaying(){ return !suspended; }
 
-/* one beat of the trio, all events placed relative to beat time t.
-   `temperature` (left-hand vertical swipe) heats the density up & down. */
+/* one beat of the trio. The BandBrain's energy chooses the GROOVE CHARACTER:
+   low → half-time feel, mid → swing, high → burning (bombs/fills/triplets). */
 function scheduleBeat(t,beatInBar){
   if(suspended) return;                                     // 間 — total hush
-  const b=beatInBar;
-  const BEAT=Transport.beatDur;
-  const off=BEAT*CONFIG.swing;                            // the swung "and"
-  const j=()=>t+rand(-0.006,0.006);                       // human micro-timing
-  const backbeat=(b===1||b===3);
-  // the BandBrain decides each part's energy per bar (reaction/interpretation/deviation).
-  // The mapping below is deliberately WIDE so the energy is clearly heard: density,
-  // dynamics, ride busyness and kick activity all open up together.
-  const P=BandBrain.parts, E=P.drums;
-  const more=v=>clamp(v*(0.2+1.8*E),0,1);                 // near-silent when cool … busy when hot
-  const acc=lerp(0.72,1.18,P.accent);                    // per-stroke dynamics (band leans in/out)
+  const E=BandBrain.effDrive, G=CONFIG.groove;
+  const band = E<G.halfTimeBelow ? 'half' : (E>G.burningAbove ? 'burn' : 'swing');
+  if(band==='half') drumsHalfTime(t,beatInBar);
+  else drumsSwing(t,beatInBar,band);
+  scheduleBass(t,beatInBar,band);
+}
 
-  // ride: quarters always; the swung "and" spreads from 2&4-only (cool) toward every
-  // beat (hot), and the wash lengthens (legato) — the cymbal audibly gets busy
+/* SWING (mid) & BURNING (high) drums. Densities/dynamics open with energy; in the
+   burning band the kit also drops "bombs" and throws an occasional fill. */
+function drumsSwing(t,b,band){
+  const BEAT=Transport.beatDur, off=BEAT*CONFIG.swing, j=()=>t+rand(-0.006,0.006);
+  const backbeat=(b===1||b===3);
+  const P=BandBrain.parts, E=P.drums;
+  const more=v=>clamp(v*(0.2+1.8*E),0,1);
+  const acc=lerp(0.72,1.18,P.accent);
+
   if(Math.random()<0.97) ride(j(),(backbeat?0.9:0.66)*acc,P.legato);
   const skip = backbeat ? CONFIG.rideSkipProb*lerp(0.4,1,E) : lerp(0,0.7,E);
   if(Math.random()<skip) ride(t+off+rand(-0.006,0.006),0.45*acc,P.legato);
-
-  // brushed hat on 2 & 4 — leans with the dynamics
   if(backbeat) hat(j(),acc);
-
-  // brushed ghost + comp accents on the snare — quiet when cool, chattering when hot
   if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22)*acc);
   if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6)*acc);
-
-  // kick: feather on 1, an extra on 3 and syncopated pushes as it heats up
   if(b===0&&Math.random()<CONFIG.featherKickProb*lerp(0.7,1.4,E)) kick(j(),0.16);
   if(b===2&&Math.random()<lerp(0,0.35,E)) kick(j(),0.18);
   if(Math.random()<more(CONFIG.kickPushProb)) kick(t+off,rand(0.22,0.36));
 
-  // walking bass — leans with the dynamics; doubles into skip notes as bass energy rises
-  if(Math.random()<CONFIG.bassWalkProb){
-    bassPluck(j(),bassNoteFor(b),(b===0?0.9:rand(0.6,0.85))*acc,BEAT);
-    if(Math.random()<clamp(0.14*(0.2+1.8*P.bass),0,1)) bassPluck(t+off,bassCur,0.32,BEAT/3);
+  if(band==='burn'){
+    const G=CONFIG.groove;
+    // ramp the abandon from 0 (at the threshold) to full (near 1.0): mild at 0.8, wild at 1.0
+    const r=clamp((E-G.burningAbove)/(1-G.burningAbove),0,1);
+    if(Math.random()<G.burnBombProb*r) (Math.random()<0.5?kick:snare)(t+BEAT*2/3+rand(-0.005,0.005),rand(0.5,0.85));
+    if(Math.random()<G.burnBombProb*0.7*r) snare(t+BEAT/3,rand(0.4,0.65));
+    if(Math.random()<G.burnBombProb*0.5*r) kick(t+BEAT/3,rand(0.3,0.5));
+    if(Math.random()<G.burnBombProb*0.4*r) ride(t+BEAT/3,0.5,P.legato);   // splashy off-beat accents
+    if(b===CONFIG.beatsPerBar-1 && Math.random()<G.burnFillProb*r) drumFill(t);
   }
+}
+
+/* HALF-TIME (low) — spacious: soft ride on quarters, the backbeat moved to beat 3
+   only, a soft kick on 1. Reads as "twice as slow" though the tempo holds. */
+function drumsHalfTime(t,b){
+  const j=()=>t+rand(-0.006,0.006);
+  const acc=lerp(0.55,0.85,BandBrain.parts.accent);
+  const back=(b===1||b===3);                                     // beats 2 & 4
+  if(back){ ride(j(),0.6*acc,0.85); hat(j(),0.55*acc); }         // cymbals ONLY on 2 & 4 — very open
+  if(b===2) snare(j(),0.5*acc);                                  // soft half-time backbeat on 3
+  if(b===0 && Math.random()<0.55) kick(j(),0.18);               // soft kick on 1
+  if(Math.random()<0.04) snare(t+Transport.beatDur*CONFIG.swing,0.12); // a rare brushed ghost
+}
+
+/* a short fill on the last beat of a burning bar */
+function drumFill(t){
+  const BEAT=Transport.beatDur, n=4, toms=[170,140,110,90];
+  for(let i=0;i<n;i++){
+    const tt=t+(i+1)*(BEAT/(n+1))+rand(-0.005,0.005);
+    if(Math.random()<0.5) snare(tt,rand(0.5,0.78)); else tom(tt,rand(0.55,0.85),toms[i%toms.length]);
+  }
+}
+
+/* walking bass — half-time plays roots/fifths long; swing walks; burning mixes in
+   1-beat and 2-beat triplet figures for contemporary motion. */
+function scheduleBass(t,b,band){
+  if(Transport.beat<bassBusyBeat) return;                  // inside a multi-beat figure
+  const BEAT=Transport.beatDur, off=BEAT*CONFIG.swing, j=()=>t+rand(-0.006,0.006);
+  const P=BandBrain.parts, acc=lerp(0.72,1.18,P.accent);
+
+  if(band==='half'){
+    if(b===0||b===2){                                       // root on 1, fifth on 3 — long & open
+      bassCur=lowNear(b===0?chord.tones[0]:(chord.tones[2]??chord.tones[0]),bassCur);
+      bassPluck(j(),bassCur,0.78*acc,BEAT*2);
+    }
+    return;
+  }
+  if(Math.random()>=CONFIG.bassWalkProb) return;            // occasional rest
+
+  if(band==='burn'){
+    const G=CONFIG.groove;
+    if((b===0||b===2) && Math.random()<G.bass2beatTripletProb){ bass2BeatTriplet(t,b); bassBusyBeat=Transport.beat+2; return; }
+    if(Math.random()<G.bassTripletProb){ bassTripletBeat(t,b); return; }
+  }
+  bassPluck(j(),bassNoteFor(b),(b===0?0.9:rand(0.6,0.85))*acc,BEAT);
+  if(Math.random()<clamp(0.14*(0.2+1.8*P.bass),0,1)) bassPluck(t+off,bassCur,0.32,BEAT/3);
+}
+function bassTripletBeat(t,b){                              // 1-beat (eighth-note) triplet
+  const sub=Transport.beatDur/3;
+  let m=bassNoteFor(b); const dir=Math.random()<0.6?1:-1;
+  for(let i=0;i<3;i++){
+    bassPluck(t+i*sub+rand(-0.004,0.004),m,(i===0?0.85:0.6),sub*1.15);
+    m=clamp(scaleStep(m,dir),26,46);
+  }
+  bassCur=m;
+}
+function bass2BeatTriplet(t,b){                             // 2-beat (quarter-note) triplet
+  const sub=2*Transport.beatDur/3;
+  let m=bassNoteFor(b); const dir=Math.random()<0.6?1:-1;
+  for(let i=0;i<3;i++){
+    bassPluck(t+i*sub+rand(-0.004,0.004),m,(i===0?0.85:0.62),sub*1.05);
+    m=clamp(scaleStep(m,dir),26,46);
+  }
+  bassCur=m;
 }
 
 /* ================================================================
@@ -607,7 +688,10 @@ const BandBrain = {
     //    answered suddenly; a gradual creep is followed lazily (a teasing lag).
     const suddenness=clamp(Math.abs(this.target-this.prevTarget)/B.suddenSpan,0,1);
     const ease=lerp(B.easeSlow,B.easeFast,suddenness);
-    this.drive += (this.target-this.drive)*ease;
+    const gap=this.target-this.drive;
+    let step=gap*ease;
+    if(Math.abs(step)<B.minApproach) step=Math.sign(gap)*Math.min(B.minApproach,Math.abs(gap));
+    this.drive += step;                                       // eased, but never crawling at the tail
 
     // 3) DEVIATION — rarely, at a phrase seam, the band does NOT do the expected
     //    thing: it teases (holds back after a push) or surges (an unbidden lift).
@@ -786,13 +870,13 @@ function releaseLead(v){
   v.o1.stop(end); v.o2.stop(end); v.lfo.stop(end);
 }
 
-const lead={ pid:null, x:0, y:0, downY:0, lastT:0, t0:0, speed:0, hSpeed:0, pressure:0, voice:null };
+const lead={ pid:null, x:0, y:0, downX:0, downY:0, lastT:0, t0:0, speed:0, hSpeed:0, pressure:0, voice:null };
 let lastLeadMidi=null;   // the most recent note — held in the HUD after the finger lifts
 let flickCooldownUntil=0;// while a right-hand flick plays out, normal note logic is suppressed
 
 function leadDown(e){
   if(!AC || lead.pid!==null) return;               // mono lead for now (left-hand zone = phase 3)
-  lead.pid=e.pointerId; lead.x=e.clientX; lead.y=e.clientY; lead.downY=e.clientY;
+  lead.pid=e.pointerId; lead.x=e.clientX; lead.y=e.clientY; lead.downX=e.clientX; lead.downY=e.clientY;
   lead.lastT=lead.t0=performance.now(); lead.speed=0; lead.hSpeed=0; lead.pressure=e.pressure||0;
   flickCooldownUntil=0;
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
@@ -813,13 +897,14 @@ function leadMove(e){
   // approach is a visually distinct gesture (particle burst, NOT a trail).
   if(now<flickCooldownUntil) return;
 
-  // a deliberate fast vertical flick — fast AND from the START of the touch (within
-  // windowMs) — plays one outside note that resolves. Speeding up mid-swipe does
-  // nothing: past the window it's a swipe, not a flick. Ordinary play is untouched.
+  // a deliberate fast flick in ANY direction — fast AND from the START of the touch
+  // (within windowMs) AND travelled far enough. Direction doesn't matter for firing;
+  // the semitone up/down is taken from the net vertical component. Speeding up
+  // mid-swipe does nothing (past the window it's a swipe). Ordinary play is untouched.
   const RF=CONFIG.rightFlick;
   if(RF.enabled && (now-lead.t0)<=RF.windowMs && lead.speed>=RF.runVel
-     && Math.abs(e.clientY-lead.downY)>=RF.minDisp && Math.abs(dy)>Math.abs(dx)){
-    fireRightFlick(dy<0?+1:-1);
+     && Math.hypot(e.clientX-lead.downX,e.clientY-lead.downY)>=RF.minDisp){
+    fireRightFlick((e.clientY-lead.downY)<0?+1:-1);        // up-ish → semitone up, else down
     flickCooldownUntil=now+RF.cooldownMs;
     return;
   }
@@ -869,6 +954,11 @@ function updateIntensity(){
   }
   if(leadDrive) leadDrive.gain.setTargetAtTime(
     lerp(CONFIG.leadSatBase,CONFIG.leadSatMax,leadIntensity), AC.currentTime, 0.1);
+
+  // temperature gently returns home when the left hand isn't setting it, so the band
+  // calms back to a resting energy instead of staying loud after a push
+  if(left.pid===null)
+    temperature += (CONFIG.bandBrain.restTemp-temperature)*CONFIG.bandBrain.tempReturn;
 }
 
 /* ---- right-hand OUTSIDE note (fired from leadMove on a deliberate fast flick) ----
@@ -901,8 +991,32 @@ function flickVisuals(notes,landing){
 }
 function fireRightFlick(dir){
   if(!lead.voice) return;
-  if(CONFIG.rightFlick.mode==='enclosure') flickEnclosure(dir);
+  const m=CONFIG.rightFlick.mode;
+  if(m==='enclosure') flickEnclosure(dir);
+  else if(m==='single') flickSingle(dir);
   else flickApproach(dir);
+}
+
+/* SINGLE — one half-step OUT note in the flick direction, HELD (no resolution).
+   The riskiest, rawest option: the player chooses to sit outside and resolves it
+   themselves by moving. Up flick = a semitone above, down = a semitone below. */
+function flickSingle(dir){
+  const RF=CONFIG.rightFlick, v=lead.voice;
+  const out=clamp(v.midi+dir,CONFIG.leadLo,CONFIG.leadHi);
+  const t=AC.currentTime;
+  v.o1.frequency.cancelScheduledValues(t); v.o2.frequency.cancelScheduledValues(t);
+  v.o1.frequency.setValueAtTime(mtof(out),t); v.o2.frequency.setValueAtTime(mtof(out),t);
+  v.flt.frequency.setTargetAtTime(4200,t,0.04);
+  v.env.gain.cancelScheduledValues(t);
+  v.env.gain.setValueAtTime(0.02,t);
+  v.env.gain.exponentialRampToValueAtTime(0.24,t+0.016);     // sharp attack, then it just sustains
+  v.midi=out; lastLeadMidi=out;
+  leadIntensity=Math.max(leadIntensity,RF.intensityKick);
+  // the single note IS the outside note → cyan ring + particle burst, no trail
+  leadTrail.length=0; ripples.length=0;
+  ripple(clamp(lead.x/W,0,1),clamp((CONFIG.leadHi-out)/(CONFIG.leadHi-CONFIG.leadLo),0,1),out,OUT_COL);
+  burstParticles(lead.x,lead.y,OUT_COL,26);
+  dbg('R-SINGLE '+(dir>0?'▲':'▼')+' '+midiName(out));
 }
 
 /* APPROACH — one half-step OUT note (against the flick), resolving back inside */
@@ -932,17 +1046,19 @@ function flickEnclosure(dir){
   const target=nearestTone(v.midi);
   const n1=clamp(target+ad,CONFIG.leadLo,CONFIG.leadHi);    // first neighbour (against the flick)
   const n2=clamp(target-ad,CONFIG.leadLo,CONFIG.leadHi);    // the other neighbour
-  const seq=[n1,n2,target], step=RF.encStepMs/1000, t=AC.currentTime;
+  const seq=[n1,n2,target], step=Transport.beatDur/3, t=AC.currentTime;  // eighth-note triplet spacing
   v.o1.frequency.cancelScheduledValues(t); v.o2.frequency.cancelScheduledValues(t);
   v.env.gain.cancelScheduledValues(t);
-  v.env.gain.setValueAtTime(Math.max(v.env.gain.value,0.0001),t);
-  v.flt.frequency.setTargetAtTime(4200,t,0.04);
+  v.flt.frequency.setTargetAtTime(4200,t,0.03);
+  // each note: from near-silence, a sharp attack, then a decay before the next — so all
+  // three articulate distinctly. The final note holds (sustains) instead of decaying.
   seq.forEach((m,i)=>{
-    const when=t+i*step;
-    if(i>0) v.env.gain.setValueAtTime(0.10,when);           // dip = re-articulate each note
-    v.env.gain.exponentialRampToValueAtTime(0.22,when+0.025);
+    const when=t+i*step, last=(i===seq.length-1);
     v.o1.frequency.setValueAtTime(mtof(m),when);
     v.o2.frequency.setValueAtTime(mtof(m),when);
+    v.env.gain.setValueAtTime(0.02,when);                   // re-attack from near silence
+    v.env.gain.exponentialRampToValueAtTime(0.24,when+0.016);
+    if(!last) v.env.gain.exponentialRampToValueAtTime(0.085,when+step*0.8);  // decay → clear gap
   });
   v.midi=target; lastLeadMidi=target;
   leadIntensity=Math.max(leadIntensity,RF.intensityKick);
@@ -1052,7 +1168,7 @@ function queueProgression(dir){
 function fireKime(){
   if(!AC) return;
   const t=AC.currentTime+0.02;                             // immediate one-shot — responsiveness over the grid
-  crash(t,0.7); kick(t,0.7); snare(t,0.75); comp(chord,t,1);
+  crash(t,0.7); kick(t,0.7); snare(t,0.75);                // percussion only — no pitched comp stab
   flash.kind='kime'; flash.a=0.38;
   dbg('FLICK ▲ → KIME');
 }
