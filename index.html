@@ -108,6 +108,7 @@ const CONFIG = {
   // ---- Harmony ----
   startProgression: 0,    // 0 = Floating
   chordChangeEveryBars: 2,// advance the chord every N bars (quantized to bar line)
+  pivotAffinityBias: 0.5, // per shared note: how much affinity biases the (otherwise random) pivot pick
 
   // ---- RhythmSection (phase-1 fixed densities; BandBrain overrides in phase 4) ----
   baseDensity: 0.5,
@@ -173,7 +174,8 @@ const CONFIG = {
     FLICK_MAX_DISP: 170,   // …but no FURTHER than this — a long sweep is a temp drag, not a flick
     HOLD_MS: 280,          // near-still contact this long → hold (間)
     HOLD_DRIFT: 16,        // px of wander still counted as "holding"
-    HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → progression swipe
+    HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → enter the progression SCRUB selector
+    selectorBand: 0.6,     // selector spans this CENTRED fraction of the width; the outer margins are dead zones
     TAP_MAX_MS: 200,       // a quick, near-still touch (no flick/hold/drag) → a comp stab
     TAP_MAX_DISP: 20,      // …with at most this much travel
     breakCut: 'cymbals',   // down-flick BREAK drops this until the next bar downbeat (小節頭):
@@ -266,7 +268,10 @@ const midiName  = m=>NOTE_NAMES[((m%12)+12)%12]+(Math.floor(m/12)-1);   // 60 �
    directly so the left hand is testable. */
 let temperature=0.44;   // left-hand vertical swipe — band heat 0..1 (rests here when idle)
 let suspended=false;    // left-hand hold — the band holds its breath (間)
-let pendingProg=null;   // left-hand horizontal swipe — progression queued to next phrase
+let pendingProg=null;   // destination progression chosen by the scrub selector (drives the V7 pivot)
+let pivotChord=null;    // transient V7 / tritone-sub / altered chord bridging into the destination
+let selectorActive=false, selectorIndex=0;  // progression scrub selector (shown while scrubbing)
+let gaugeFrom=0, gaugeTo=0;  // transition gauge span in beats (commit → destination arrival)
 let cutActive=false;    // left-hand down-flick — a BREAK: stop SCHEDULING the dropped instruments
 let cutUntilBeat=0;     // …until this beat (next 小節頭). Sounds already ringing decay naturally.
 
@@ -391,13 +396,42 @@ function playPad(c, when){
   });
 }
 
-function setChord(i, when){
-  chordIdx=i; chord=CHORDS[i];
-  bgTensionTarget=chord.tension;
-  playPad(chord, when);
+function applyChord(c, when){              // set ANY chord (progression chord or a transient pivot)
+  chord=c; bgTensionTarget=c.tension; playPad(c, when);
 }
-function advanceChord(when){
-  setChord((chordIdx+1)%CHORDS.length, when);
+function setChord(i, when){ chordIdx=i; applyChord(CHORDS[i], when); }
+function advanceChord(when){ setChord((chordIdx+1)%CHORDS.length, when); }
+
+/* a transient dominant that prepares the destination key: V7 (a 5th above the target
+   root), its tritone sub (a half-step above), or an altered V7. Among the three, prefer
+   the one most AT HOME in the current chord (most shared notes → smoothest pivot). */
+function chooseDominant(targetRootPc){
+  // weighted-random among the pivot flavours: affinity to the current key biases the
+  // choice, but every flavour can come up — so resolutions stay varied, not repetitive
+  const cands=['V7','sub','alt','dim'].map(k=>buildDominant(targetRootPc,k));
+  const w=cands.map(d=>1 + CONFIG.pivotAffinityBias*d.tones.filter(pc=>chord.scale.includes(pc)).length);
+  let total=0; for(const x of w) total+=x;
+  let r=Math.random()*total;
+  for(let i=0;i<cands.length;i++){ r-=w[i]; if(r<=0) return cands[i]; }
+  return cands[cands.length-1];
+}
+function buildDominant(targetRootPc, kind){
+  const pc=x=>((x%12)+12)%12;
+  if(kind==='dim'){                                        // leading-tone °7 resolving UP into the target
+    const d=pc(targetRootPc-1), lo=40+d;
+    return {name:NOTE_NAMES[d]+'°7', scaleName:NOTE_NAMES[d]+' dim',
+            scale:[d,d+2,d+3,d+5,d+6,d+8,d+9,d+11].map(pc),
+            tones:[d,d+3,d+6,d+9].map(pc),
+            voicing:[lo,lo+3,lo+6,lo+9,lo+12], tension:0.85};
+  }
+  const R=pc(kind==='sub' ? targetRootPc+1 : targetRootPc+7);   // sub: half above; V7: fifth above
+  const lo=40+R, alt=(kind==='alt');
+  const scale = alt ? [R,R+1,R+3,R+4,R+6,R+8,R+10].map(pc)      // altered
+                    : [R,R+2,R+4,R+5,R+7,R+9,R+10].map(pc);     // mixolydian
+  const tones = alt ? [R,R+4,R+10].map(pc) : [R,R+4,R+7,R+10].map(pc);
+  const voicing = alt ? [lo,lo+10,lo+15,lo+20] : [lo,lo+7,lo+10,lo+16,lo+21];
+  const label = NOTE_NAMES[R] + (alt?'7alt':(kind==='sub'?'7(sub)':'7'));
+  return {name:label, scaleName:label, scale, tones, voicing, tension: alt?0.9:0.8};
 }
 
 /* ================================================================
@@ -793,13 +827,20 @@ const Transport = {
     // the band reads the room and decides its next bar (reaction/interpretation/deviation)
     BandBrain.decide(bar);
 
-    // a queued progression switch (left-hand horizontal swipe) slides in on
-    // the phrase boundary — never abruptly, always at a musical seam
-    if(pendingProg!==null && bar%CONFIG.barsPerPhrase===0){
-      progIdx=pendingProg; CHORDS=PROGRESSIONS[progIdx].chords; pendingProg=null;
-      chordIdx=0; setChord(0,t);
-    }else if(bar>0 && bar%CONFIG.chordChangeEveryBars===0){
-      advanceChord(t);                                    // ordinary chord drift, bar-quantized
+    // chord changes (and the progression transition) land on chord-change boundaries
+    if(bar>0 && bar%CONFIG.chordChangeEveryBars===0){
+      if(pendingProg!==null && !pivotChord){
+        // step 1: a dominant preparing the destination's first chord
+        const destRoot=PROGRESSIONS[pendingProg].chords[0].tones[0];
+        pivotChord=chooseDominant(destRoot);               // dominant most akin to the current key
+        applyChord(pivotChord,t);
+      }else if(pendingProg!==null && pivotChord){
+        // step 2: resolve into the destination progression
+        progIdx=pendingProg; CHORDS=PROGRESSIONS[progIdx].chords;
+        pendingProg=null; pivotChord=null; chordIdx=0; setChord(0,t);
+      }else{
+        advanceChord(t);                                 // ordinary chord drift
+      }
     }
 
     // breathing comping stab near the top of the bar (denser as comp energy rises)
@@ -1117,7 +1158,7 @@ function flickEnclosure(dir){
    bottom-left zone. The crux is telling them apart: a slow vertical
    drag is TEMPERATURE (continuous), a sharp vertical flick is a
    one-shot HIT/DROP — same direction, split by velocity. A still
-   finger is HOLD (間); a horizontal sweep queues a PROGRESSION change.
+   finger is HOLD (間); a horizontal scrub picks a PROGRESSION (V7 pivot on release).
    ================================================================ */
 const C=CONFIG.leftHand;
 const flash={a:0,kind:''};       // momentary screen feedback for discrete events
@@ -1159,16 +1200,17 @@ function leftMove(e){
   left.sumX=e.clientX-left.x0; left.sumY=e.clientY-left.y0;
   left.maxDisp=Math.max(left.maxDisp,Math.hypot(left.sumX,left.sumY));
 
-  if(left.mode==='hold'||left.mode==='hswipe') return;    // already committed this gesture
+  if(left.mode==='hold') return;                          // a hold ignores movement
+  if(left.mode==='scrub'){ selectorIndex=xToProgIndex(e.clientX); return; }  // keep choosing
 
   const horiz=Math.abs(left.sumX)>Math.abs(left.sumY)*C.AXIS_RATIO;
   const vert =Math.abs(left.sumY)>Math.abs(left.sumX)*C.AXIS_RATIO;
 
-  // horizontal sweep → queue a progression change for the next phrase boundary
+  // horizontal sweep → enter the progression SCRUB selector (commit on release)
   if(horiz && Math.abs(left.sumX)>C.HSWIPE_MIN_DISP){
     temperature=left.tempStart;                              // undo any stray heat from the wind-up
-    left.mode='hswipe';
-    queueProgression(left.sumX>0?+1:-1);
+    left.mode='scrub'; selectorActive=true;
+    selectorIndex=xToProgIndex(e.clientX);
     return;
   }
   // ANY vertical drag adjusts temperature live, regardless of speed — so even a
@@ -1187,7 +1229,11 @@ function leftUp(e){
   const contact=performance.now()-left.t0;
   if(left.mode==='hold'){
     suspended=false; dbg('HOLD release');                  // release the held breath
-  }else if(left.mode!=='hswipe'){
+  }else if(left.mode==='scrub'){
+    selectorActive=false;                                  // commit the chosen progression (V7 pivot follows)
+    if(selectorIndex>=0) commitProgression(selectorIndex); // …unless released in a dead-zone margin
+    else dbg('PROG (cancel)');
+  }else{
     // A flick is a SHORT, sharp, vertical STAB: high peak speed, brief contact, and
     // a small travel. Anything that swept a long way is a temperature drag and is
     // KEPT — even a brisk one — so sweeping down to cool isn't mistaken for a DROP,
@@ -1208,10 +1254,22 @@ function leftUp(e){
 }
 
 /* ---- gesture effects (the band's full interpretation arrives in phase 4) ---- */
-function queueProgression(dir){
-  const n=PROGRESSIONS.length;
-  pendingProg=((progIdx+dir)%n+n)%n;                        // received silently (bottom-edge indicator only)
-  dbg('SWIPE '+(dir>0?'▶':'◀')+' → '+PROGRESSIONS[pendingProg].name);
+function xToProgIndex(x){                                   // finger X → progression segment, or -1 (dead zone)
+  const n=PROGRESSIONS.length, w=CONFIG.leftHand.selectorBand*W, x0=(W-w)/2;  // centred band
+  if(x<x0 || x>x0+w) return -1;                            // outer margins (left/right) = no selection
+  return clamp(Math.floor((x-x0)/(w/n)),0,n-1);
+}
+function commitProgression(i){
+  if(i===progIdx && pivotChord===null) { dbg('PROG = '+PROGRESSIONS[i].name); return; } // already here
+  pendingProg=i;                                            // the V7 pivot fires at the next chord boundary
+  const span=CONFIG.chordChangeEveryBars*CONFIG.beatsPerBar, P=beatPos();
+  const pivotBeat=Math.ceil((P+0.001)/span)*span;          // next boundary = pivot starts
+  gaugeFrom=P; gaugeTo=pivotBeat+span;                      // …dominant ends one slot later = destination
+  dbg('PROG → '+PROGRESSIONS[i].name);
+}
+function beatPos(){                                         // continuous beat position (for the transition gauge)
+  if(!AC||!Transport.beatDur) return 0;
+  return Transport.beat - clamp((Transport.nextBeatTime-AC.currentTime)/Transport.beatDur,0,1);
 }
 function fireHit(){
   if(!AC) return;
@@ -1357,10 +1415,21 @@ function frame(){
   suspendViz += ((suspended?1:0)-suspendViz)*0.08;
   if(suspendViz>0.01){ cx.fillStyle=`rgba(2,3,9,${suspendViz*0.55})`; cx.fillRect(0,0,W,H); }
 
-  // a queued progression change shimmers along the bottom edge until it lands
-  if(pendingProg!==null){
-    const a=0.25+0.18*Math.sin(now/180);
-    cx.fillStyle=`rgba(150,200,255,${a})`; cx.fillRect(0,H-4,W,4);
+  // progression SCRUB selector — the chosen name follows the finger, just above it
+  // (same font/size as the debug HUD)
+  if(selectorActive && selectorIndex>=0){                 // no name in the dead-zone margins
+    cx.font='10px ui-monospace,Menlo,monospace'; cx.textAlign='center';
+    // the current progression is dimmed (selecting it changes nothing)
+    cx.fillStyle = selectorIndex===progIdx ? 'rgba(232,213,163,0.38)' : 'rgba(232,213,163,0.9)';
+    cx.fillText(PROGRESSIONS[selectorIndex].name, left.x, left.y-60);
+    cx.textAlign='start';
+  }
+
+  // transition gauge — ONE fill from the commit until the dominant ends (the moment the
+  // destination progression arrives). Reaching the right edge = the switch.
+  if((pendingProg!==null || pivotChord) && gaugeTo>gaugeFrom){
+    const g=clamp((beatPos()-gaugeFrom)/(gaugeTo-gaugeFrom),0,1);
+    cx.fillStyle='rgba(232,213,163,0.55)'; cx.fillRect(0,H-4,W*g,4);
   }
 
   // discrete event flash — a warm lift for a HIT, a cool lift for a DROP
