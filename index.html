@@ -151,14 +151,23 @@ const CONFIG = {
     TEMP_SENSITIVITY: 3.75,// screen-fraction dragged → temperature delta (~2 drags = full range)
     FLICK_VEL: 1.2,        // px/ms peak speed at or above which a stroke is a flick…
     FLICK_MAX_MS: 360,     // …only if the whole contact was this brief…
-    FLICK_MIN_DISP: 30,    // …and travelled at least this far vertically (px)
+    FLICK_MIN_DISP: 30,    // …and travelled at least this far vertically (px)…
+    FLICK_MAX_DISP: 170,   // …but no FURTHER than this — a long sweep is a temp drag, not a flick
     HOLD_MS: 280,          // near-still contact this long → hold (間)
     HOLD_DRIFT: 16,        // px of wander still counted as "holding"
     HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → progression swipe
   },
 
-  // ---- placeholder for phase 4 ----
-  // bandBrain: { deviationProb:0.12, deviationCooldownBars:4, weights:{...} }
+  // ---- BandBrain — reaction / interpretation / deviation (decided each bar) ----
+  bandBrain:{
+    tempWeight: 0.80,     // how much the temperature dial drives band energy
+    leadWeight: 0.70,     // how much the soloist's own intensity drives it (reaction)
+    suddenSpan: 0.22,     // a target jump this big counts as fully "sudden"
+    easeSlow: 0.10,       // a gradual change → lazy, teasing response
+    easeFast: 0.55,       // a sudden change → the band jumps with you
+    deviationProb: 0.12,  // chance, per phrase, the band deliberately diverges
+    cooldownBars: 4,      // bars before another deviation may fire
+  },
 };
 
 /* ================================================================
@@ -359,15 +368,16 @@ function advanceChord(when){
    ================================================================ */
 let bassCur=36;
 
-function ride(t,vel){
-  // brushes on the ride: a soft dark wash, no hard stick attack
+function ride(t,vel,legato=0){
+  // brushes on the ride: a soft dark wash, no hard stick attack.
+  // legato (0..1, from BandBrain) lengthens the wash as the band heats up
   const s=noiseSrc(t,0.8);
   const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=4300;
   const lp=AC.createBiquadFilter();lp.type='lowpass';lp.frequency.value=9000;
   const env=AC.createGain();
   env.gain.setValueAtTime(0.0001,t);
   env.gain.exponentialRampToValueAtTime(vel*0.06,t+0.014);
-  env.gain.exponentialRampToValueAtTime(0.0001,t+0.55);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+lerp(0.5,0.95,legato));
   s.connect(hp);hp.connect(lp);lp.connect(env);env.connect(bandDry);env.connect(bandRev);
   if(Math.random()<0.4){                                  // faint metallic shimmer
     const o=AC.createOscillator();o.type='triangle';
@@ -525,31 +535,105 @@ function scheduleBeat(t,beatInBar){
   const off=BEAT*CONFIG.swing;                            // the swung "and"
   const j=()=>t+rand(-0.006,0.006);                       // human micro-timing
   const backbeat=(b===1||b===3);
-  const h=temperature;                                    // 0 cool … 1 boiling
-  const more=v=>clamp(v*(0.45+1.3*h),0,1);               // heat opens the density up
+  // the BandBrain decides each part's energy per bar (reaction/interpretation/deviation).
+  // The mapping below is deliberately WIDE so the energy is clearly heard: density,
+  // dynamics, ride busyness and kick activity all open up together.
+  const P=BandBrain.parts, E=P.drums;
+  const more=v=>clamp(v*(0.2+1.8*E),0,1);                 // near-silent when cool … busy when hot
+  const acc=lerp(0.72,1.18,P.accent);                    // per-stroke dynamics (band leans in/out)
 
-  // ride: quarter on every beat, swung skip on 2 & 4 (and more, hotter)
-  if(Math.random()<0.97) ride(j(),backbeat?0.95:0.72);
-  if(backbeat){ if(Math.random()<CONFIG.rideSkipProb) ride(t+off+rand(-0.006,0.006),0.5); }
-  else if(Math.random()<more(CONFIG.rideExtraSkipProb)) ride(t+off,0.4);
+  // ride: quarters always; the swung "and" spreads from 2&4-only (cool) toward every
+  // beat (hot), and the wash lengthens (legato) — the cymbal audibly gets busy
+  if(Math.random()<0.97) ride(j(),(backbeat?0.9:0.66)*acc,P.legato);
+  const skip = backbeat ? CONFIG.rideSkipProb*lerp(0.4,1,E) : lerp(0,0.7,E);
+  if(Math.random()<skip) ride(t+off+rand(-0.006,0.006),0.45*acc,P.legato);
 
-  // brushed hat on 2 & 4
-  if(backbeat) hat(j(),1);
+  // brushed hat on 2 & 4 — leans with the dynamics
+  if(backbeat) hat(j(),acc);
 
-  // brushed ghost + comp accents on the snare
-  if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22));
-  if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6));
+  // brushed ghost + comp accents on the snare — quiet when cool, chattering when hot
+  if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22)*acc);
+  if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6)*acc);
 
-  // feathered + occasional push kick (pushes appear as it heats up)
-  if(b===0&&Math.random()<CONFIG.featherKickProb) kick(j(),0.16);
+  // kick: feather on 1, an extra on 3 and syncopated pushes as it heats up
+  if(b===0&&Math.random()<CONFIG.featherKickProb*lerp(0.7,1.4,E)) kick(j(),0.16);
+  if(b===2&&Math.random()<lerp(0,0.35,E)) kick(j(),0.18);
   if(Math.random()<more(CONFIG.kickPushProb)) kick(t+off,rand(0.22,0.36));
 
-  // walking bass — doubles into skip notes when hot
+  // walking bass — leans with the dynamics; doubles into skip notes as bass energy rises
   if(Math.random()<CONFIG.bassWalkProb){
-    bassPluck(j(),bassNoteFor(b),b===0?0.9:rand(0.6,0.85),BEAT);
-    if(Math.random()<more(0.12)) bassPluck(t+off,bassCur,0.32,BEAT/3);  // skipped triplet ghost
+    bassPluck(j(),bassNoteFor(b),(b===0?0.9:rand(0.6,0.85))*acc,BEAT);
+    if(Math.random()<clamp(0.14*(0.2+1.8*P.bass),0,1)) bassPluck(t+off,bassCur,0.32,BEAT/3);
   }
 }
+
+/* ================================================================
+   BANDBRAIN — the band is a conductee, not a switchboard. Once per bar
+   it reads the room (temperature dial + the soloist's leadIntensity +
+   pending suggestions) and decides each part's next behaviour through
+   three lenses: REACTION, INTERPRETATION, DEVIATION.
+   ================================================================ */
+const BandBrain = {
+  drive:0.35, target:0.35, prevTarget:0.35, effDrive:0.35,
+  parts:{ drums:0.4, bass:0.4, comp:0.4, accent:0.4, legato:0.4 },
+  dev:null, cooldown:0, history:[],
+
+  reset(){ this.drive=this.target=this.prevTarget=this.effDrive=0.35;
+           this.dev=null; this.cooldown=0; this.history=[]; },
+
+  decide(bar){
+    const B=CONFIG.bandBrain;
+
+    // 1) REACTION — the explicit dial AND the soloist's own voice move the band.
+    //    A hot, high, fast solo pulls the band up even with no left-hand prompt.
+    this.prevTarget=this.target;
+    this.target=clamp(temperature*B.tempWeight + leadIntensity*B.leadWeight, 0, 1);
+
+    // 2) INTERPRETATION — it's not just how much, but how. A sudden change is
+    //    answered suddenly; a gradual creep is followed lazily (a teasing lag).
+    const suddenness=clamp(Math.abs(this.target-this.prevTarget)/B.suddenSpan,0,1);
+    const ease=lerp(B.easeSlow,B.easeFast,suddenness);
+    this.drive += (this.target-this.drive)*ease;
+
+    // 3) DEVIATION — rarely, at a phrase seam, the band does NOT do the expected
+    //    thing: it teases (holds back after a push) or surges (an unbidden lift).
+    //    Bounded to one bar, cooled down, and never repeating back-to-back.
+    if(this.dev && bar>=this.dev.untilBar) this.dev=null;
+    if(this.cooldown>0) this.cooldown--;
+    const phraseSeam = bar%CONFIG.barsPerPhrase===0;
+    if(!this.dev && phraseSeam && this.cooldown===0 && Math.random()<B.deviationProb){
+      const type=this.pickDeviation();
+      this.dev={type, untilBar:bar+1};
+      this.cooldown=B.cooldownBars;
+      this.history.push(type); if(this.history.length>4) this.history.shift();
+    }
+
+    // resolve the effective energy (a live deviation overrides for its bar)
+    let eff=this.drive;
+    if(this.dev?.type==='tease') eff=this.drive*0.3;          // asked to boil, it holds
+    else if(this.dev?.type==='push') eff=clamp(this.drive+0.45,0,1); // surges unbidden
+    this.effDrive=eff;
+
+    // overall presence — the whole band leans back when cool, forward when hot.
+    // This global lift is the most audible part of the response.
+    if(bandDry) bandDry.gain.setTargetAtTime(lerp(0.62,1.12,eff),AC.currentTime,0.4);
+
+    // 4) hand each part its next behaviour — a little independent jitter so the
+    //    section breathes organically rather than moving as one block
+    const p=this.parts;
+    p.drums =clamp(eff+rand(-0.08,0.08),0,1);
+    p.bass  =clamp(eff+rand(-0.08,0.08),0,1);
+    p.comp  =clamp(eff+rand(-0.10,0.10),0,1);
+    p.accent=eff; p.legato=eff;
+  },
+
+  pickDeviation(){
+    const opts=['tease','push'];
+    const last=this.history[this.history.length-1];
+    const pool=opts.filter(o=>o!==last);                      // don't repeat the last kind
+    return pool[irand(0,pool.length-1)];
+  },
+};
 
 /* ================================================================
    TRANSPORT — the single musical clock. A 25ms look-ahead loop
@@ -565,6 +649,7 @@ const Transport = {
     this.nextBeatTime=AC.currentTime+0.08;
     this.beat=0;
     bassCur=lowNear(chord.tones[0],36);
+    BandBrain.reset();
     this.running=true;
     this.timer=setInterval(()=>this.tick(),CONFIG.schedulerInterval);
   },
@@ -586,6 +671,9 @@ const Transport = {
   },
 
   onBar(t,bar){
+    // the band reads the room and decides its next bar (reaction/interpretation/deviation)
+    BandBrain.decide(bar);
+
     // a queued progression switch (left-hand horizontal swipe) slides in on
     // the phrase boundary — never abruptly, always at a musical seam
     if(pendingProg!==null && bar%CONFIG.barsPerPhrase===0){
@@ -595,8 +683,8 @@ const Transport = {
       advanceChord(t);                                    // ordinary chord drift, bar-quantized
     }
 
-    // breathing comping stab near the top of the bar (denser when hot)
-    if(bandPlaying() && Math.random()<clamp(CONFIG.compProb*(0.5+1.0*temperature),0,1))
+    // breathing comping stab near the top of the bar (denser as comp energy rises)
+    if(bandPlaying() && Math.random()<clamp(CONFIG.compProb*(0.5+1.0*BandBrain.parts.comp),0,1))
       comp(chord,t+rand(0,0.02),rand(0.7,1));
   },
 
@@ -771,17 +859,21 @@ function dbg(s){ dbgAction=s; }
 function inLeftZone(x,y){ return x < W*C.zoneW && y > H*C.zoneTop; }
 
 const left={ pid:null, mode:'idle', x:0,y:0, x0:0,y0:0, lastT:0, t0:0,
-             peakVel:0, sumX:0, sumY:0, maxDisp:0, tempApplied:0, holdTimer:null };
+             peakVel:0, sumX:0, sumY:0, maxDisp:0, tempStart:0, holdTimer:null };
 
 function leftDown(e){
   left.pid=e.pointerId; left.mode='undecided';
   left.x=left.x0=e.clientX; left.y=left.y0=e.clientY;
   left.lastT=left.t0=performance.now();
-  left.peakVel=0; left.sumX=0; left.sumY=0; left.maxDisp=0; left.tempApplied=0;
+  left.peakVel=0; left.sumX=0; left.sumY=0; left.maxDisp=0;
+  left.tempStart=temperature;                              // restore point if this turns out NOT to be a temp drag
   clearTimeout(left.holdTimer);
   // a finger that lands and lingers, barely moving, is a hold — the band breathes out
   left.holdTimer=setTimeout(()=>{
-    if(left.mode==='undecided' && left.maxDisp<C.HOLD_DRIFT){ left.mode='hold'; suspended=true; dbg('HOLD ◼ suspend'); }
+    if(left.mode==='undecided' && left.maxDisp<C.HOLD_DRIFT){
+      temperature=left.tempStart;                          // a hold isn't a temp gesture — undo any micro-drift
+      left.mode='hold'; suspended=true; dbg('HOLD ◼ suspend');
+    }
   }, C.HOLD_MS);
 }
 function leftMove(e){
@@ -801,19 +893,18 @@ function leftMove(e){
 
   // horizontal sweep → queue a progression change for the next phrase boundary
   if(horiz && Math.abs(left.sumX)>C.HSWIPE_MIN_DISP){
-    temperature=clamp(temperature-left.tempApplied,0,1); left.tempApplied=0;  // undo stray heat
+    temperature=left.tempStart;                              // undo any stray heat from the wind-up
     left.mode='hswipe';
     queueProgression(left.sumX>0?+1:-1);
     return;
   }
-  // a SLOW vertical drag is temperature (live & continuous). A FAST vertical
-  // stroke fails this speed gate, so it stays UNDECIDED and can become a flick
-  // at release — this is exactly how the two are kept from misfiring.
-  if(vert && vel<C.FLICK_VEL){
+  // ANY vertical drag adjusts temperature live, regardless of speed — so even a
+  // brisk sweep down to cool actually moves it. If the gesture turns out to be a
+  // flick (a short sharp stab), the change is undone at release (see leftUp).
+  if(vert){
     left.mode='temp';
     const d=(-dy)/H*C.TEMP_SENSITIVITY;                   // up = hotter, down = cooler
     temperature=clamp(temperature+d,0,1);
-    left.tempApplied+=d;
     dbg('TEMP '+(d>=0?'▲':'▼')+' '+temperature.toFixed(2));
   }
 }
@@ -824,18 +915,19 @@ function leftUp(e){
   if(left.mode==='hold'){
     suspended=false; dbg('HOLD release');                  // release the held breath
   }else if(left.mode!=='hswipe'){
-    // A flick winds up from rest, so its first samples are slow and may have
-    // tipped us into 'temp' — that's fine. We still test for a flick at release,
-    // judged mainly by PEAK speed (a slow temperature drag never spikes), and if
-    // it IS a flick we roll back any heat it applied on the way. This is how the
-    // two coexist: temperature stays live, the flick still gets through.
+    // A flick is a SHORT, sharp, vertical STAB: high peak speed, brief contact, and
+    // a small travel. Anything that swept a long way is a temperature drag and is
+    // KEPT — even a brisk one — so sweeping down to cool isn't mistaken for a DROP,
+    // and a flick (which restores temp) doesn't undo a real temperature change.
+    const sumY=Math.abs(left.sumY);
     const isFlick = left.peakVel>=C.FLICK_VEL && contact<=C.FLICK_MAX_MS
-                 && Math.abs(left.sumY)>=C.FLICK_MIN_DISP
-                 && Math.abs(left.sumY)>Math.abs(left.sumX);
+                 && sumY>=C.FLICK_MIN_DISP && sumY<=C.FLICK_MAX_DISP
+                 && sumY>Math.abs(left.sumX);
     if(isFlick){
-      temperature=clamp(temperature-left.tempApplied,0,1); // a flick must not also boil the band
+      temperature=left.tempStart;                          // a flick never changes temperature
       if(left.sumY<0) fireKime(); else fireDrop();         // up = hit, down = drop
     }
+    // else: a temperature drag (long and/or slow) — keep the live change
   }
   left.pid=null; left.mode='idle';
 }
@@ -984,7 +1076,8 @@ function frame(){
       'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+'\n'+
       'prog '+PROGRESSIONS[progIdx].name+'\n'+
       'chord '+chord.name+'\n'+
-      'lead '+leadNote+'  i'+leadIntensity.toFixed(2);
+      'lead '+leadNote+'  i'+leadIntensity.toFixed(2)+'\n'+
+      'band '+BandBrain.effDrive.toFixed(2)+'→'+BandBrain.target.toFixed(2)+(BandBrain.dev?('  ✦'+BandBrain.dev.type):'');
   }
   requestAnimationFrame(frame);
 }
