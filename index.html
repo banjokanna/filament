@@ -138,6 +138,20 @@ const CONFIG = {
   intensityDecay: 0.06,         // EMA fall when released
   leadSatBase: 1.0, leadSatMax: 2.4, // saturation drive grows with intensity (Rosenwinkel)
 
+  // ---- right-hand FLICK — a deliberate fast flick plays a chromatic OUTSIDE figure ----
+  rightFlick:{
+    enabled: true,
+    mode: 'approach',     // 'enclosure' (3-note wrap) | 'approach' (1 out note + resolve)
+    runVel: 2.8,          // px/ms — a hard vertical flick (well above normal play)
+    minDisp: 45,          // …and it must travel at least this far vertically from touchdown
+                          //    (rejects the spurious velocity spike of the very first move)
+    windowMs: 160,        // …but only if it's fast from the START of the touch (not mid-swipe)
+    cooldownMs: 260,      // one flick at a time; also suppresses the rapid-rearticulation choke
+    outMs: 120,           // approach: how long the out note holds before resolving inward
+    encStepMs: 110,       // enclosure: time per note
+    intensityKick: 0.85,  // leadIntensity floor on a flick (so the band bites)
+  },
+
   // ---- Mix ----
   masterGain: 0.8,
   reverbSend: 0.95,
@@ -772,13 +786,15 @@ function releaseLead(v){
   v.o1.stop(end); v.o2.stop(end); v.lfo.stop(end);
 }
 
-const lead={ pid:null, x:0, y:0, lastT:0, speed:0, hSpeed:0, pressure:0, voice:null };
+const lead={ pid:null, x:0, y:0, downY:0, lastT:0, t0:0, speed:0, hSpeed:0, pressure:0, voice:null };
 let lastLeadMidi=null;   // the most recent note — held in the HUD after the finger lifts
+let flickCooldownUntil=0;// while a right-hand flick plays out, normal note logic is suppressed
 
 function leadDown(e){
   if(!AC || lead.pid!==null) return;               // mono lead for now (left-hand zone = phase 3)
-  lead.pid=e.pointerId; lead.x=e.clientX; lead.y=e.clientY;
-  lead.lastT=performance.now(); lead.speed=0; lead.hSpeed=0; lead.pressure=e.pressure||0;
+  lead.pid=e.pointerId; lead.x=e.clientX; lead.y=e.clientY; lead.downY=e.clientY;
+  lead.lastT=lead.t0=performance.now(); lead.speed=0; lead.hSpeed=0; lead.pressure=e.pressure||0;
+  flickCooldownUntil=0;
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
   const midi=snapToAvailable(yToMidi(y01));
   lead.voice=createLeadVoice(midi,x01); lastLeadMidi=midi;
@@ -792,6 +808,23 @@ function leadMove(e){
   lead.speed=Math.hypot(dx,dy)/dt; lead.hSpeed=Math.abs(dx)/dt;
   lead.pressure=e.pressure||0;
   lead.x=e.clientX; lead.y=e.clientY; lead.lastT=now;
+
+  // while a flick is playing out, let it ring — no trail, no notes. The chromatic
+  // approach is a visually distinct gesture (particle burst, NOT a trail).
+  if(now<flickCooldownUntil) return;
+
+  // a deliberate fast vertical flick — fast AND from the START of the touch (within
+  // windowMs) — plays one outside note that resolves. Speeding up mid-swipe does
+  // nothing: past the window it's a swipe, not a flick. Ordinary play is untouched.
+  const RF=CONFIG.rightFlick;
+  if(RF.enabled && (now-lead.t0)<=RF.windowMs && lead.speed>=RF.runVel
+     && Math.abs(e.clientY-lead.downY)>=RF.minDisp && Math.abs(dy)>Math.abs(dx)){
+    fireRightFlick(dy<0?+1:-1);
+    flickCooldownUntil=now+RF.cooldownMs;
+    return;
+  }
+
+  pushTrail(e.clientX,e.clientY);                          // normal play only — the sung line
 
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
   const midi=snapToAvailable(yToMidi(y01));
@@ -811,7 +844,6 @@ function leadMove(e){
   lead.voice.g2.gain.setTargetAtTime(lerp(0.08,0.45,x01),t,0.05);     // saw edge ← position
   lead.voice.flt.frequency.setTargetAtTime(lerp(900,4600,bright),t,0.05);
   lead.voice.lfoGain.gain.setTargetAtTime(artic*CONFIG.leadVibratoMaxCents,t,0.08);
-  pushTrail(e.clientX,e.clientY);
 }
 function leadUp(e){
   if(lead.pid!==e.pointerId) return;
@@ -837,6 +869,85 @@ function updateIntensity(){
   }
   if(leadDrive) leadDrive.gain.setTargetAtTime(
     lerp(CONFIG.leadSatBase,CONFIG.leadSatMax,leadIntensity), AC.currentTime, 0.1);
+}
+
+/* ---- right-hand OUTSIDE note (fired from leadMove on a deliberate fast flick) ----
+   The lead never plays outside the scale otherwise; a deliberate flick lets it step
+   a half-step OUT (in the flick direction) for a moment, then RESOLVE by half-step
+   back into a chord tone — a chromatic approach. Always resolves, so it reads as
+   intentional, not as a wrong note. */
+function resolveTone(m,dir){          // nearest chord tone from m, searching in dir
+  let n=m, g=0;
+  while(!isTonePc(n) && g++<13) n+=dir;
+  return clamp(n,CONFIG.leadLo,CONFIG.leadHi);
+}
+function nearestTone(m){              // nearest chord tone either side of m
+  for(let d=0;d<=6;d++){
+    if(isTonePc(m+d)) return clamp(m+d,CONFIG.leadLo,CONFIG.leadHi);
+    if(isTonePc(m-d)) return clamp(m-d,CONFIG.leadLo,CONFIG.leadHi);
+  }
+  return clamp(m,CONFIG.leadLo,CONFIG.leadHi);
+}
+/* visuals shared by both flick figures: short (no) trail, one cyan ring per outside
+   note + the landing ring in the lead colour, and a blue-white particle burst */
+function flickVisuals(notes,landing){
+  leadTrail.length=0; ripples.length=0;
+  const x01=clamp(lead.x/W,0,1);
+  notes.forEach(m=>{
+    const col = m===landing ? null : OUT_COL;
+    ripple(x01,clamp((CONFIG.leadHi-m)/(CONFIG.leadHi-CONFIG.leadLo),0,1),m,col);
+  });
+  burstParticles(lead.x,lead.y,OUT_COL,26);
+}
+function fireRightFlick(dir){
+  if(!lead.voice) return;
+  if(CONFIG.rightFlick.mode==='enclosure') flickEnclosure(dir);
+  else flickApproach(dir);
+}
+
+/* APPROACH — one half-step OUT note (against the flick), resolving back inside */
+function flickApproach(dir){
+  const RF=CONFIG.rightFlick, v=lead.voice, from=v.midi, ad=-dir;
+  const out=clamp(from+ad,CONFIG.leadLo,CONFIG.leadHi);
+  const target=resolveTone(out,-ad);
+  const t=AC.currentTime, res=t+RF.outMs/1000;
+  v.o1.frequency.cancelScheduledValues(t); v.o2.frequency.cancelScheduledValues(t);
+  v.o1.frequency.setValueAtTime(mtof(out),t); v.o2.frequency.setValueAtTime(mtof(out),t);
+  v.flt.frequency.setTargetAtTime(4200,t,0.04);
+  v.env.gain.cancelScheduledValues(t);
+  v.env.gain.setValueAtTime(Math.max(v.env.gain.value,0.0001),t);
+  v.env.gain.exponentialRampToValueAtTime(0.22,t+0.03);
+  v.o1.frequency.setTargetAtTime(mtof(target),res,0.02);
+  v.o2.frequency.setTargetAtTime(mtof(target),res,0.02);
+  v.midi=target; lastLeadMidi=target;
+  leadIntensity=Math.max(leadIntensity,RF.intensityKick);
+  flickVisuals([out,target],target);
+  dbg('R-OUT '+(dir>0?'▲':'▼')+' '+midiName(out)+'→'+midiName(target));
+}
+
+/* ENCLOSURE — wrap a chord tone with both chromatic neighbours, then land on it.
+   The held voice steps n1 → n2 → target, re-articulating each for a clear 3-note wrap. */
+function flickEnclosure(dir){
+  const RF=CONFIG.rightFlick, v=lead.voice, ad=-dir;
+  const target=nearestTone(v.midi);
+  const n1=clamp(target+ad,CONFIG.leadLo,CONFIG.leadHi);    // first neighbour (against the flick)
+  const n2=clamp(target-ad,CONFIG.leadLo,CONFIG.leadHi);    // the other neighbour
+  const seq=[n1,n2,target], step=RF.encStepMs/1000, t=AC.currentTime;
+  v.o1.frequency.cancelScheduledValues(t); v.o2.frequency.cancelScheduledValues(t);
+  v.env.gain.cancelScheduledValues(t);
+  v.env.gain.setValueAtTime(Math.max(v.env.gain.value,0.0001),t);
+  v.flt.frequency.setTargetAtTime(4200,t,0.04);
+  seq.forEach((m,i)=>{
+    const when=t+i*step;
+    if(i>0) v.env.gain.setValueAtTime(0.10,when);           // dip = re-articulate each note
+    v.env.gain.exponentialRampToValueAtTime(0.22,when+0.025);
+    v.o1.frequency.setValueAtTime(mtof(m),when);
+    v.o2.frequency.setValueAtTime(mtof(m),when);
+  });
+  v.midi=target; lastLeadMidi=target;
+  leadIntensity=Math.max(leadIntensity,RF.intensityKick);
+  flickVisuals(seq,target);
+  dbg('R-ENC '+(dir>0?'▲':'▼')+' '+midiName(n1)+' '+midiName(n2)+'→'+midiName(target));
 }
 
 /* ================================================================
@@ -972,11 +1083,19 @@ let bgTension=0.2, bgTensionTarget=0.2;
 const pulses=[];
 const leadTrail=[];   // the line you are singing — the signature visual
 const ripples=[];     // a ring at each note onset / leap
+const parts=[];       // NIGHT LANGUAGE-style particle burst (used by the outside flick)
+const OUT_COL=[180,212,255];   // NIGHT LANGUAGE's blue-white "outside" colour
 
 function pushTrail(x,y){ leadTrail.push({x,y,t:performance.now()}); if(leadTrail.length>120) leadTrail.shift(); }
-function ripple(x01,y01,midi){
+function ripple(x01,y01,midi,col){
   const p01=clamp((midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo),0,1);
-  ripples.push({x:x01*W,y:y01*H,r:6,maxR:lerp(40,150,p01),a:0.8});
+  ripples.push({x:x01*W,y:y01*H,r:6,maxR:lerp(40,150,p01),a:0.8,col:col||null});
+}
+function burstParticles(x,y,col,n){
+  for(let i=0;i<n;i++){
+    const ang=rand(0,Math.PI*2), sp=rand(0.6,3.2);
+    parts.push({x,y,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,life:1,decay:rand(0.012,0.028),r:rand(1,3),col});
+  }
 }
 
 /* schedule a visual bloom to fire at the same audio time as the beat */
@@ -1020,13 +1139,23 @@ function frame(){
   // lead colour runs hotter (amber→near-red) as leadIntensity rises
   const lr=255, lg=lerp(220,150,leadIntensity)|0, lb=lerp(150,60,leadIntensity)|0;
 
-  // note-onset rings
+  // note-onset rings (an outside note carries its own cyan colour)
   for(let i=ripples.length-1;i>=0;i--){
     const r=ripples[i]; r.r+=(r.maxR-r.r)*0.06; r.a*=0.95;
     if(r.a<0.02){ripples.splice(i,1);continue;}
+    const c=r.col||[lr,lg,lb];
     cx.beginPath();cx.arc(r.x,r.y,r.r,0,7);
-    cx.strokeStyle=`rgba(${lr},${lg},${lb},${r.a})`;cx.lineWidth=1.5;cx.stroke();
+    cx.strokeStyle=`rgba(${c[0]},${c[1]},${c[2]},${r.a})`;cx.lineWidth=1.5;cx.stroke();
   }
+
+  // particle burst (the outside flick) — NIGHT LANGUAGE-style scatter
+  for(let i=parts.length-1;i>=0;i--){
+    const p=parts[i]; p.vx*=0.96; p.vy*=0.96; p.x+=p.vx; p.y+=p.vy; p.life-=p.decay;
+    if(p.life<=0){parts.splice(i,1);continue;}
+    cx.beginPath();cx.arc(p.x,p.y,p.r,0,7);
+    cx.fillStyle=`rgba(${p.col[0]},${p.col[1]},${p.col[2]},${p.life*0.85})`;cx.fill();
+  }
+  if(parts.length>600)parts.splice(0,parts.length-600);
 
   // the sung line — a fading thread, thicker & hotter with intensity
   while(leadTrail.length && now-leadTrail[0].t>1200) leadTrail.shift();
