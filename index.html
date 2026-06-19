@@ -3,7 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta http-equiv="Cache-Control" content="no-store">
 <title>VOICE CONDUCTOR</title>
 <style>
   :root{
@@ -102,6 +101,8 @@ const CONFIG = {
   barsPerPhrase: 4,       // harmony / section boundary granularity
   lookahead: 0.12,        // s — how far ahead the scheduler reserves audio
   schedulerInterval: 25,  // ms — setInterval tick for the look-ahead loop
+  catchupResync: 0.25,    // s — if the scheduler falls this far behind (a stall), skip the
+                          //    backlog and resume cleanly instead of flooding every missed beat
   swing: 0.62,            // placement of the "and" 8th (0.5 straight, .66 triplet)
 
   // ---- Harmony ----
@@ -123,6 +124,8 @@ const CONFIG = {
   leadLo: 38, leadHi: 96,       // playable midi range mapped to the vertical axis
   leadAttack: 0.045,            // s — how fast a note speaks
   leadRelease: 0.9,             // s — tail after the finger lifts
+  leadMaxVoices: 6,             // cap on overlapping lead voices (rapid-tap tails) — steal oldest
+                                //    (lead is monophonic; normal play never reaches this — transparent)
   leadPortamento: 0.06,         // glide time-constant for slides (legato)
   leadLeapSemitones: 3,         // a jump of >= this, made fast, re-articulates…
   leadLeapSpeed: 0.30,          // px/ms — …above this finger speed (else it glides)
@@ -171,6 +174,8 @@ const CONFIG = {
     HOLD_MS: 280,          // near-still contact this long → hold (間)
     HOLD_DRIFT: 16,        // px of wander still counted as "holding"
     HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → progression swipe
+    TAP_MAX_MS: 200,       // a quick, near-still touch (no flick/hold/drag) → a comp stab
+    TAP_MAX_DISP: 20,      // …with at most this much travel
   },
 
   // ---- BandBrain — reaction / interpretation / deviation (decided each bar) ----
@@ -445,7 +450,7 @@ function snare(t,vel){
   o.connect(te);te.connect(bandDry);o.start(t);o.stop(t+0.1);
 }
 function crash(t,vel){
-  // a wide bright cymbal wash — used for the up-flick band hit (キメ)
+  // a wide bright cymbal wash — used for the up-flick band HIT
   const s=noiseSrc(t,1.4);
   const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=2600;
   const env=AC.createGain();
@@ -754,6 +759,9 @@ const Transport = {
   stop(){ clearInterval(this.timer); this.timer=null; this.running=false; },
 
   tick(){
+    // if the main thread stalled (GC, screen sleep, app switch) the audio clock ran on
+    // without us — skip the backlog and resync, rather than flooding every missed beat
+    if(AC.currentTime - this.nextBeatTime > CONFIG.catchupResync) this.nextBeatTime = AC.currentTime + 0.06;
     while(this.nextBeatTime < AC.currentTime + CONFIG.lookahead){
       const t=this.nextBeatTime, b=this.beat;
       const beatInBar=b%CONFIG.beatsPerBar;
@@ -825,9 +833,9 @@ function createLeadVoice(midi,x01){
   const o2=AC.createOscillator(); o2.type='sawtooth';
   o1.frequency.value=f; o2.frequency.value=f;
   o1.detune.value=3; o2.detune.value=-4;
-  const g2=AC.createGain(); g2.gain.value=lerp(0.08,0.45,x01);   // edge from position
+  const g2=AC.createGain(); g2.gain.value=lerp(0.03,0.45,x01);   // edge from position
   const flt=AC.createBiquadFilter(); flt.type='lowpass'; flt.Q.value=1.0;
-  flt.frequency.value=lerp(900,3800,x01);
+  flt.frequency.value=lerp(650,3800,x01);
   const env=AC.createGain();
   env.gain.setValueAtTime(0.0001,t);
   env.gain.exponentialRampToValueAtTime(0.22,t+CONFIG.leadAttack);
@@ -837,7 +845,30 @@ function createLeadVoice(midi,x01){
   lfo.connect(lfoGain); lfoGain.connect(o1.detune); lfoGain.connect(o2.detune);
   o1.connect(flt); o2.connect(g2); g2.connect(flt); flt.connect(env); env.connect(leadInput);
   o1.start(t); o2.start(t); lfo.start(t);
-  return {o1,o2,g2,flt,env,lfo,lfoGain,midi,born:t};
+  const v={o1,o2,g2,flt,env,lfo,lfoGain,midi,born:t,stopAt:Infinity};
+  leadVoices.push(v); capLeadVoices(v);
+  return v;
+}
+/* keep overlapping lead voices bounded: drop finished ones, and if rapid tapping has
+   stacked too many decaying tails, steal the oldest (it's already faded & masked) */
+function capLeadVoices(keep){
+  const now=AC.currentTime;
+  for(let i=leadVoices.length-1;i>=0;i--) if(leadVoices[i].stopAt<=now) leadVoices.splice(i,1);
+  while(leadVoices.length>CONFIG.leadMaxVoices){
+    const old=leadVoices.shift();
+    if(old && old!==keep) killLead(old);
+  }
+}
+function killLead(v){
+  const t=AC.currentTime;
+  if(v.stopAt<=t+0.07) return;                       // already stopping
+  try{
+    v.env.gain.cancelScheduledValues(t);
+    v.env.gain.setValueAtTime(Math.max(v.env.gain.value,0.0001),t);
+    v.env.gain.exponentialRampToValueAtTime(0.0001,t+0.04);  // quick fade — no click
+    v.o1.stop(t+0.06); v.o2.stop(t+0.06); v.lfo.stop(t+0.06);
+  }catch(_){}
+  v.stopAt=t+0.06;
 }
 function glideLeadTo(v,midi){                       // legato slide
   const f=mtof(midi), t=AC.currentTime;
@@ -867,12 +898,14 @@ function releaseLead(v){
   }
   v.env.gain.exponentialRampToValueAtTime(0.0001,t+bloom+CONFIG.leadRelease);
   const end=t+bloom+CONFIG.leadRelease+0.1;
-  v.o1.stop(end); v.o2.stop(end); v.lfo.stop(end);
+  try{ v.o1.stop(end); v.o2.stop(end); v.lfo.stop(end); }catch(_){}  // may already be stolen
+  v.stopAt=end;
 }
 
 const lead={ pid:null, x:0, y:0, downX:0, downY:0, lastT:0, t0:0, speed:0, hSpeed:0, pressure:0, voice:null };
 let lastLeadMidi=null;   // the most recent note — held in the HUD after the finger lifts
 let flickCooldownUntil=0;// while a right-hand flick plays out, normal note logic is suppressed
+const leadVoices=[];     // every still-ringing lead voice (active + decaying tails), for the polyphony cap
 
 function leadDown(e){
   if(!AC || lead.pid!==null) return;               // mono lead for now (left-hand zone = phase 3)
@@ -926,8 +959,8 @@ function leadMove(e){
   const t=AC.currentTime;
   const artic=clamp(lead.hSpeed*1.6,0,1);
   const bright=clamp(x01*0.8+artic*0.4,0,1);
-  lead.voice.g2.gain.setTargetAtTime(lerp(0.08,0.45,x01),t,0.05);     // saw edge ← position
-  lead.voice.flt.frequency.setTargetAtTime(lerp(900,4600,bright),t,0.05);
+  lead.voice.g2.gain.setTargetAtTime(lerp(0.03,0.45,x01),t,0.05);     // saw edge ← position
+  lead.voice.flt.frequency.setTargetAtTime(lerp(650,4600,bright),t,0.05);
   lead.voice.lfoGain.gain.setTargetAtTime(artic*CONFIG.leadVibratoMaxCents,t,0.08);
 }
 function leadUp(e){
@@ -1146,13 +1179,15 @@ function leftUp(e){
     // a small travel. Anything that swept a long way is a temperature drag and is
     // KEPT — even a brisk one — so sweeping down to cool isn't mistaken for a DROP,
     // and a flick (which restores temp) doesn't undo a real temperature change.
-    const sumY=Math.abs(left.sumY);
+    const disp=Math.hypot(left.sumX,left.sumY);            // total travel — direction-agnostic
     const isFlick = left.peakVel>=C.FLICK_VEL && contact<=C.FLICK_MAX_MS
-                 && sumY>=C.FLICK_MIN_DISP && sumY<=C.FLICK_MAX_DISP
-                 && sumY>Math.abs(left.sumX);
+                 && disp>=C.FLICK_MIN_DISP && disp<=C.FLICK_MAX_DISP;
     if(isFlick){
       temperature=left.tempStart;                          // a flick never changes temperature
-      if(left.sumY<0) fireKime(); else fireDrop();         // up = hit, down = drop
+      if(left.sumY<0) fireHit(); else fireDrop();          // up-ish = hit, down-ish = drop (any direction)
+    }else if(contact<=C.TAP_MAX_MS && left.maxDisp<C.TAP_MAX_DISP){
+      temperature=left.tempStart;                          // a tap isn't a temperature change
+      firePunch();                                         // a quick, repeatable tom/kick punch
     }
     // else: a temperature drag (long and/or slow) — keep the live change
   }
@@ -1165,19 +1200,23 @@ function queueProgression(dir){
   pendingProg=((progIdx+dir)%n+n)%n;                        // received silently (bottom-edge indicator only)
   dbg('SWIPE '+(dir>0?'▶':'◀')+' → '+PROGRESSIONS[pendingProg].name);
 }
-function fireKime(){
+function fireHit(){
   if(!AC) return;
   const t=AC.currentTime+0.02;                             // immediate one-shot — responsiveness over the grid
-  crash(t,0.7); kick(t,0.7); snare(t,0.75);                // percussion only — no pitched comp stab
-  flash.kind='kime'; flash.a=0.38;
-  dbg('FLICK ▲ → KIME');
+  crash(t,0.55); kick(t,0.55); snare(t,0.6);               // percussion only — no pitched comp stab
+  flash.kind='hit'; flash.a=0.30;
+  dbg('FLICK ▲ → HIT');
 }
 function fireDrop(){
+  // left DOWN-flick — its old tom/kick punch has moved to the tap; awaiting a new role
+  dbg('FLICK ▼ → (free)');
+}
+function firePunch(){
   if(!AC) return;
-  const t=AC.currentTime+0.02;          // a punchy one-shot — floor-tom + kick + snare together
-  tom(t,1,95); kick(t,0.9); snare(t,0.7);
-  flash.kind='drop'; flash.a=0.3;
-  dbg('FLICK ▼ → DROP');
+  const t=AC.currentTime+0.02;          // left TAP — a punchy one-shot: floor-tom + kick + snare + cool flash
+  tom(t,0.8,95); kick(t,0.7); snare(t,0.55);
+  flash.kind='drop'; flash.a=0.24;
+  dbg('TAP → PUNCH');
 }
 /* ================================================================
    VISUALS (phase-1 minimal) — a dark room that breathes with the
@@ -1304,10 +1343,10 @@ function frame(){
     cx.fillStyle=`rgba(150,200,255,${a})`; cx.fillRect(0,H-4,W,4);
   }
 
-  // discrete event flash — bright for a hit (キメ), a dark sink for a drop (ドロップ)
+  // discrete event flash — a warm lift for a HIT, a cool lift for a DROP
   if(flash.a>0.01){
     flash.a*=0.9;
-    cx.fillStyle = flash.kind==='kime'
+    cx.fillStyle = flash.kind==='hit'
       ? `rgba(255,232,184,${flash.a})`
       : `rgba(150,210,235,${flash.a})`;    // pale cyan — a cool lift, in the app's blue accent tone
     cx.fillRect(0,0,W,H);
