@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>VOICE CONDUCTOR</title>
+<style>
+  :root{
+    --gold:#e8d5a3; --amber:#ffb35c; --rose:#c98a8a;
+    --ink:#05060e;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{height:100%;overflow:hidden;background:var(--ink);}
+  body{
+    font-family:Georgia,'Times New Roman','Hiragino Mincho ProN','Yu Mincho',serif;
+    color:var(--gold);
+    -webkit-user-select:none;user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  /* the night is playable everywhere; no controls float over it (VC: 明示的UIは出さない) */
+  #stage{position:fixed;inset:0;display:block;touch-action:none;cursor:default;}
+
+  /* debug HUD — top-right, gated by CONFIG.debug; not part of the real instrument */
+  #dbg{
+    position:fixed;top:10px;right:12px;z-index:8;display:none;
+    font-family:ui-monospace,Menlo,monospace;font-size:10px;line-height:1.55;
+    color:rgba(232,213,163,.6);text-align:right;white-space:pre;
+    pointer-events:none;text-shadow:0 0 6px rgba(0,0,0,.85);
+  }
+
+  /* ---------- start overlay — the only UI, needed to unlock AudioContext ---------- */
+  #veil{
+    position:fixed;inset:0;z-index:10;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    background:radial-gradient(ellipse at 50% 60%,#0a0d20 0%,#04050c 70%);
+    transition:opacity 1.6s ease;cursor:pointer;text-align:center;padding:24px;
+  }
+  #veil.gone{opacity:0;pointer-events:none;}
+  #veil h1{
+    font-size:clamp(30px,6vw,58px);font-weight:300;
+    letter-spacing:.4em;text-indent:.4em;
+    color:rgba(232,213,163,.95);
+  }
+  #veil p{
+    margin-top:22px;font-size:12px;letter-spacing:.3em;
+    color:rgba(201,168,138,.55);line-height:2.4;max-width:520px;
+  }
+  #enter{
+    margin-top:46px;padding:14px 56px;
+    border:1px solid rgba(232,213,163,.4);border-radius:2px;
+    font-size:12px;letter-spacing:.6em;text-indent:.6em;
+    color:var(--gold);background:transparent;cursor:pointer;
+    font-family:inherit;transition:all .5s;
+  }
+  #enter:hover{background:rgba(232,213,163,.08);box-shadow:0 0 30px rgba(255,179,92,.25);}
+  #enter:focus{outline:none;}
+  #copyright{
+    position:absolute;bottom:clamp(18px,4vh,36px);left:0;right:0;
+    text-align:center;font-size:9px;letter-spacing:.2em;
+    color:rgba(201,168,138,.35);line-height:1.8;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="dbg"></div>
+
+<div id="veil">
+  <h1>VOICE CONDUCTOR</h1>
+  <p>右手の一本指で歌い、左手でバンドを指揮する。<br>― まずは、ただ鳴らしておく ―</p>
+  <button id="enter">ENTER</button>
+  <div id="copyright">© idiomorph<br>Phase 1 — autonomous band</div>
+</div>
+
+<script>
+'use strict';
+/* ================================================================
+   VOICE CONDUCTOR — a single-file contemporary-jazz instrument.
+   Web Audio API + Canvas, zero dependencies.
+
+   PHASE 1: Transport + AudioEngine + RhythmSection.
+   Tap ENTER and a trio plays itself — brushed swing ride, walking
+   upright bass, and breathing comping over a Floating progression.
+   No player input yet (RightHand=phase2, LeftHand=phase3,
+   BandBrain=phase4, full Visuals=phase5).
+
+   Built on the NIGHT LANGUAGE engine; the key change here is that a
+   single Transport owns beat/bar/phrase and every musical event is
+   scheduled against it (the lead will stay free & immediate later).
+   ================================================================ */
+
+/* ================================================================
+   CONFIG — every tunable lives here. No magic numbers in logic.
+   ================================================================ */
+const CONFIG = {
+  debug: true,            // show the top-right gesture/state HUD (turn off for real play)
+
+  // ---- Transport ----
+  bpm: 128,               // medium-up, Rosenwinkel-leaning
+  beatsPerBar: 4,
+  barsPerPhrase: 4,       // harmony / section boundary granularity
+  lookahead: 0.12,        // s — how far ahead the scheduler reserves audio
+  schedulerInterval: 25,  // ms — setInterval tick for the look-ahead loop
+  swing: 0.62,            // placement of the "and" 8th (0.5 straight, .66 triplet)
+
+  // ---- Harmony ----
+  startProgression: 0,    // 0 = Floating
+  chordChangeEveryBars: 2,// advance the chord every N bars (quantized to bar line)
+
+  // ---- RhythmSection (phase-1 fixed densities; BandBrain overrides in phase 4) ----
+  baseDensity: 0.5,
+  bassWalkProb: 0.94,
+  rideSkipProb: 0.9,      // the swung "and" on beats 2 & 4
+  rideExtraSkipProb: 0.15,// occasional skip elsewhere — keeps the cymbal alive
+  ghostSnareProb: 0.22,
+  compAccentProb: 0.10,   // brushed snare comp accents
+  featherKickProb: 0.30,  // soft kick on the one
+  kickPushProb: 0.08,     // syncopated push kick
+  compProb: 0.55,         // chance of a comping stab per bar
+
+  // ---- RightHand — the lead is "声" (a voice): sustained, gliding ----
+  leadLo: 38, leadHi: 96,       // playable midi range mapped to the vertical axis
+  leadAttack: 0.045,            // s — how fast a note speaks
+  leadRelease: 0.9,             // s — tail after the finger lifts
+  leadPortamento: 0.06,         // glide time-constant for slides (legato)
+  leadLeapSemitones: 3,         // a jump of >= this, made fast, re-articulates…
+  leadLeapSpeed: 0.30,          // px/ms — …above this finger speed (else it glides)
+  leadVibratoHz: 5.5,
+  leadVibratoMaxCents: 16,      // vibrato depth ceiling, opened by horizontal motion
+  chordToneWeight: 2.0,         // snap bias toward chord tones (vs other scale notes)
+  snapWaver: 0.5,               // tiny random humanisation in the snap choice
+
+  // ---- leadIntensity — finger speed + register (+ pressure), 0..1 → BandBrain ----
+  intensitySpeedRef: 1.2,       // px/ms that maps to full speed-intensity
+  intensityWeights: { speed:0.5, height:0.4, pressure:0.3 },
+  intensityAttack: 0.18,        // EMA rise
+  intensityDecay: 0.06,         // EMA fall when released
+  leadSatBase: 1.0, leadSatMax: 2.4, // saturation drive grows with intensity (Rosenwinkel)
+
+  // ---- Mix ----
+  masterGain: 0.8,
+  reverbSend: 0.95,
+  delaySend: 0.40,
+
+  // ---- LeftHand — 4 gestures, split apart by velocity (the misfire crux) ----
+  leftHand:{
+    zoneW: 0.45,           // gesture area: left this fraction of the width…
+    zoneTop: 0.50,         // …and below this fraction of the height (bottom-left)
+    AXIS_RATIO: 1.3,       // how decisively vertical-vs-horizontal a stroke must be
+    TEMP_SENSITIVITY: 3.75,// screen-fraction dragged → temperature delta (~2 drags = full range)
+    FLICK_VEL: 0.85,       // px/ms peak speed at or above which a stroke is a flick…
+    FLICK_MAX_MS: 360,     // …only if the whole contact was this brief…
+    FLICK_MIN_DISP: 30,    // …and travelled at least this far vertically (px)
+    HOLD_MS: 280,          // near-still contact this long → hold (間)
+    HOLD_DRIFT: 16,        // px of wander still counted as "holding"
+    HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → progression swipe
+    dropBars: 1,           // down-flick: the band pulls back this many bars
+  },
+
+  // ---- placeholder for phase 4 ----
+  // bandBrain: { deviationProb:0.12, deviationCooldownBars:4, weights:{...} }
+};
+
+/* ================================================================
+   HARMONY DATA — pc = pitch classes (0 = C).
+   Phase 1 runs the FLOATING progression (chromatic mediants &
+   3-tonic axis; Lydian / altered / melodic-minor colours).
+   A second modal-pedal pool and the Coltrane pool arrive in phase 3.
+   ================================================================ */
+const PROGRESSIONS = [
+{name:'Floating', chords:[
+ {name:'Cmaj7(♯11)',  scaleName:'C Lydian',            scale:[0,2,4,6,7,9,11],   tones:[0,4,7,11],   voicing:[36,52,59,66,74], tension:0.20},
+ {name:'E♭maj7(♯11)', scaleName:'E♭ Lydian',           scale:[3,5,7,9,10,0,2],   tones:[3,7,10,2],   voicing:[39,55,62,69,74], tension:0.30},
+ {name:'Gmaj7(♯5)',   scaleName:'G Lydian Augmented',  scale:[7,9,11,1,3,4,6],   tones:[7,11,3,6],   voicing:[43,54,59,63,69], tension:0.55},
+ {name:'B♭min(maj7)', scaleName:'B♭ Melodic Minor',    scale:[10,0,1,3,5,7,9],   tones:[10,1,5,9],   voicing:[46,53,61,69,72], tension:0.50},
+ {name:'E♭7(♯11)',    scaleName:'E♭ Lydian Dominant',  scale:[3,5,7,9,10,0,1],   tones:[3,7,10,1],   voicing:[39,49,55,60,69], tension:0.45},
+ {name:'A♭maj7',      scaleName:'A♭ Lydian',           scale:[8,10,0,2,3,5,7],   tones:[8,0,3,7],    voicing:[44,55,60,65,70], tension:0.20},
+ {name:'Emaj7(♯11)',  scaleName:'E Lydian',            scale:[4,6,8,10,11,1,3],  tones:[4,8,11,3],   voicing:[40,56,63,70,75], tension:0.30},
+ {name:'G7alt',       scaleName:'G Altered',           scale:[7,8,10,11,1,3,5],  tones:[7,11,5],     voicing:[43,53,59,63,68], tension:0.90},
+ {name:'Cmin11',      scaleName:'C Dorian',            scale:[0,2,3,5,7,9,10],   tones:[0,3,7,10,5], voicing:[36,53,58,63,67], tension:0.40},
+ {name:'F♯dim(maj7)', scaleName:'F♯ Diminished (W–H)', scale:[6,8,9,11,0,2,3,5], tones:[6,9,0,5],    voicing:[42,57,60,65,72], tension:0.80},
+ {name:'Fmaj7(♯5)',   scaleName:'F Lydian Augmented',  scale:[5,7,9,11,1,2,4],   tones:[5,9,1,4],    voicing:[41,52,57,61,67], tension:0.60},
+ {name:'D♭maj7(♯11)', scaleName:'D♭ Lydian',           scale:[1,3,5,7,8,10,0],   tones:[1,5,8,0],    voicing:[37,53,60,67,72], tension:0.25},
+]},
+{name:'Horizon', chords:[
+ {name:'Gmaj9',       scaleName:'G Lydian',            scale:[7,9,11,1,2,4,6],   tones:[7,11,2,6],   voicing:[43,54,59,64,69], tension:0.10},
+ {name:'Emin9',       scaleName:'E Dorian',            scale:[4,6,7,9,11,1,2],   tones:[4,7,11,2],   voicing:[40,50,55,59,66], tension:0.20},
+ {name:'Amin11',      scaleName:'A Dorian',            scale:[9,11,0,2,4,6,7],   tones:[9,0,4,7],    voicing:[45,55,60,64,71], tension:0.25},
+ {name:'D7(13)',      scaleName:'D Mixolydian',        scale:[2,4,6,7,9,11,0],   tones:[2,6,9,0],    voicing:[38,48,54,59,64], tension:0.35},
+ {name:'C♯min9',      scaleName:'C♯ Dorian',           scale:[1,3,4,6,8,10,11],  tones:[1,4,8,11],   voicing:[37,47,52,56,63], tension:0.28},
+ {name:'F♯7(13)',     scaleName:'F♯ Mixolydian',       scale:[6,8,10,11,1,3,4],  tones:[6,10,1,4],   voicing:[42,52,58,63,68], tension:0.40},
+ {name:'Bmaj7(♯11)',  scaleName:'B Lydian',            scale:[11,1,3,5,6,8,10],  tones:[11,3,6,10],  voicing:[47,58,63,66,73], tension:0.15},
+ {name:'Emaj7(♯11)',  scaleName:'E Lydian',            scale:[4,6,8,10,11,1,3],  tones:[4,8,11,3],   voicing:[40,56,63,70,75], tension:0.18},
+]},
+{name:'Noir', chords:[
+ {name:'Cmin(maj7)',  scaleName:'C Melodic Minor',     scale:[0,2,3,5,7,9,11],   tones:[0,3,7,11],   voicing:[36,51,59,62,67], tension:0.55},
+ {name:'Dm7(♭5)',     scaleName:'D Locrian',           scale:[2,3,5,7,8,10,0],   tones:[2,5,8,0],    voicing:[38,48,53,56,63], tension:0.70},
+ {name:'G7alt',       scaleName:'G Altered',           scale:[7,8,10,11,1,3,5],  tones:[7,11,5],     voicing:[43,53,59,63,68], tension:0.90},
+ {name:'Cmin11',      scaleName:'C Dorian',            scale:[0,2,3,5,7,9,10],   tones:[0,3,7,10],   voicing:[36,53,58,63,67], tension:0.50},
+ {name:'Fmin9',       scaleName:'F Dorian',            scale:[5,7,8,10,0,2,3],   tones:[5,8,0,3],    voicing:[41,51,56,60,67], tension:0.55},
+ {name:'B♭7alt',      scaleName:'B♭ Altered',          scale:[10,11,1,2,4,6,8],  tones:[10,2,8],     voicing:[46,56,62,66,71], tension:0.85},
+ {name:'A♭maj7(♯11)', scaleName:'A♭ Lydian',           scale:[8,10,0,2,3,5,7],   tones:[8,0,3,7],    voicing:[44,55,60,62,70], tension:0.60},
+ {name:'G7(♭13)',     scaleName:'G Mixolydian ♭13',    scale:[7,9,11,0,2,3,5],   tones:[7,11,5,3],   voicing:[43,53,59,63,69], tension:0.80},
+]},
+];
+let progIdx = CONFIG.startProgression;
+let CHORDS = PROGRESSIONS[progIdx].chords;
+
+/* ---- small helpers ---- */
+const rand  = (a,b)=>a+Math.random()*(b-a);
+const irand = (a,b)=>a+Math.floor(Math.random()*(b-a+1));
+const lerp  = (a,b,t)=>a+(b-a)*t;
+const clamp = (v,a,b)=>Math.min(b,Math.max(a,v));
+const mtof  = m=>440*Math.pow(2,(m-69)/12);
+const NOTE_NAMES=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const midiName  = m=>NOTE_NAMES[((m%12)+12)%12]+(Math.floor(m/12)-1);   // 60 → C4
+
+/* ---- shared performance signals — the three actors talk through these ----
+   leadIntensity (declared with the audio engine) is the fourth. The
+   BandBrain (phase 4) will read all of these; for now they drive the band
+   directly so the left hand is testable. */
+let temperature=0.35;   // left-hand vertical swipe — band heat 0..1
+let suspended=false;    // left-hand hold — the band holds its breath (間)
+let pendingProg=null;   // left-hand horizontal swipe — progression queued to next phrase
+let dropUntilBeat=0;    // left-hand down-flick — band pulls back until this beat
+
+/* ================================================================
+   AUDIO ENGINE — master bus, compressor, lush reverb, motif delay.
+   ================================================================ */
+let AC=null, master, reverbSend, dryGain, delaySend;
+let bandDry=null, bandRev=null, noiseBuf=null;
+let leadInput=null, leadDrive=null;     // lead bus + its saturation drive node
+let leadIntensity=0;                     // 0..1 — recomputed each frame, fed to BandBrain (phase 4)
+
+/* soft-clip curve — a thin skin of saturation, not fuzz */
+function makeSatCurve(){
+  const n=1024, c=new Float32Array(n);
+  for(let i=0;i<n;i++){ const x=i/(n-1)*2-1; c[i]=Math.tanh(x*1.8); }
+  return c;
+}
+
+function buildAudio(){
+  AC = new (window.AudioContext||window.webkitAudioContext)();
+
+  master = AC.createGain(); master.gain.value = CONFIG.masterGain;
+  const comp = AC.createDynamicsCompressor();
+  comp.threshold.value=-18; comp.knee.value=24; comp.ratio.value=3;
+  master.connect(comp); comp.connect(AC.destination);
+
+  // lush, long reverb from a generated stereo impulse — the Rosenwinkel haze
+  const conv = AC.createConvolver();
+  const len = AC.sampleRate*4.2, ir = AC.createBuffer(2,len,AC.sampleRate);
+  for(let ch=0;ch<2;ch++){
+    const d = ir.getChannelData(ch);
+    for(let i=0;i<len;i++){
+      const t=i/len;
+      d[i]=(Math.random()*2-1)*Math.pow(1-t,2.6)*(0.4+0.6*Math.random());
+    }
+  }
+  conv.buffer = ir;
+  const revGain = AC.createGain(); revGain.gain.value = CONFIG.reverbSend;
+  reverbSend = AC.createGain(); reverbSend.gain.value = 1;
+  reverbSend.connect(conv); conv.connect(revGain); revGain.connect(master);
+
+  dryGain = AC.createGain(); dryGain.gain.value = 0.85;
+  dryGain.connect(master);
+
+  // floating feedback delay for motif trails (used by lead later; bed now)
+  const dly = AC.createDelay(2); dly.delayTime.value = 0.46;
+  const fb  = AC.createGain(); fb.gain.value = 0.32;
+  const df  = AC.createBiquadFilter(); df.type='lowpass'; df.frequency.value=1600;
+  dly.connect(df); df.connect(fb); fb.connect(dly);
+  const dOut = AC.createGain(); dOut.gain.value=0.5;
+  df.connect(dOut); dOut.connect(reverbSend); dOut.connect(dryGain);
+  delaySend = AC.createGain(); delaySend.gain.value=CONFIG.delaySend;
+  delaySend.connect(dly);
+
+  // rhythm-section sub-buses (a touch drier than the lead bed)
+  bandDry = AC.createGain(); bandDry.gain.value=0.9; bandDry.connect(dryGain);
+  bandRev = AC.createGain(); bandRev.gain.value=0.3; bandRev.connect(reverbSend);
+
+  // shared white-noise buffer for brushes / thumps
+  noiseBuf = AC.createBuffer(1,AC.sampleRate,AC.sampleRate);
+  const nd=noiseBuf.getChannelData(0);
+  for(let i=0;i<nd.length;i++) nd[i]=Math.random()*2-1;
+
+  // lead bus — every lead voice runs through a saturator whose drive
+  // climbs with leadIntensity, so a fast, high line naturally pushes & growls
+  leadInput = AC.createGain(); leadInput.gain.value=1;
+  const shaper = AC.createWaveShaper(); shaper.curve=makeSatCurve(); shaper.oversample='2x';
+  leadDrive = AC.createGain(); leadDrive.gain.value=CONFIG.leadSatBase;
+  const leadPost = AC.createGain(); leadPost.gain.value=0.6;
+  leadInput.connect(leadDrive); leadDrive.connect(shaper); shaper.connect(leadPost);
+  leadPost.connect(dryGain); leadPost.connect(reverbSend); leadPost.connect(delaySend);
+}
+function noiseSrc(t,dur){
+  const s=AC.createBufferSource(); s.buffer=noiseBuf; s.loop=true;
+  s.start(t); s.stop(t+dur); return s;
+}
+
+/* ================================================================
+   HARMONY ENGINE — current chord + available notes, advanced by the
+   Transport on bar lines (no wall-clock timers — boundary quantized).
+   ================================================================ */
+let chordIdx=0, chord=CHORDS[0], padVoices=[];
+
+const inScale  = m=>chord.scale.includes(((m%12)+12)%12);
+const isTonePc = m=>chord.tones.includes(((m%12)+12)%12);
+function scaleStep(m,steps){            // walk n steps along the current scale
+  let cur=m; const s=Math.sign(steps)||1;
+  for(let i=0;i<Math.abs(steps);i++){
+    let n=cur+s; while(!inScale(n)) n+=s; cur=n;
+  }
+  return cur;
+}
+
+/* slow spread pad — the chord hanging in the air. Scheduled at `when`
+   so it lands exactly on the bar line the Transport reserved. */
+function playPad(c, when){
+  const t0 = when ?? AC.currentTime;
+  padVoices.forEach(v=>{
+    v.env.gain.cancelScheduledValues(t0);
+    v.env.gain.setValueAtTime(v.env.gain.value,t0);
+    v.env.gain.exponentialRampToValueAtTime(0.0001,t0+2.4);
+    v.oscs.forEach(o=>o.stop(t0+2.6));
+  });
+  padVoices=[];
+  c.voicing.forEach((m,i)=>{
+    const t = t0 + i*0.09;                       // softly arpeggiated entry
+    const f = mtof(m);
+    const o1=AC.createOscillator(), o2=AC.createOscillator();
+    o1.type='triangle'; o2.type='sawtooth';
+    o1.frequency.value=f; o2.frequency.value=f;
+    o1.detune.value= 5+Math.random()*3; o2.detune.value=-6-Math.random()*3;
+    const g2=AC.createGain(); g2.gain.value=0.16;
+    const flt=AC.createBiquadFilter(); flt.type='lowpass';
+    flt.frequency.value=lerp(700,1400,i/c.voicing.length); flt.Q.value=0.5;
+    const env=AC.createGain();
+    env.gain.setValueAtTime(0.0001,t);
+    env.gain.exponentialRampToValueAtTime(0.04,t+1.6);
+    o1.connect(flt); o2.connect(g2); g2.connect(flt);
+    flt.connect(env); env.connect(dryGain); env.connect(reverbSend);
+    o1.start(t); o2.start(t);
+    padVoices.push({env,oscs:[o1,o2]});
+  });
+}
+
+function setChord(i, when){
+  chordIdx=i; chord=CHORDS[i];
+  bgTensionTarget=chord.tension;
+  playPad(chord, when);
+}
+function advanceChord(when){
+  setChord((chordIdx+1)%CHORDS.length, when);
+}
+
+/* ================================================================
+   RHYTHM SECTION — brushed swing trio. Every voice is scheduled at an
+   absolute AudioContext time handed down by the Transport.
+   ================================================================ */
+let bassCur=36;
+
+function ride(t,vel){
+  // brushes on the ride: a soft dark wash, no hard stick attack
+  const s=noiseSrc(t,0.8);
+  const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=4300;
+  const lp=AC.createBiquadFilter();lp.type='lowpass';lp.frequency.value=9000;
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.06,t+0.014);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.55);
+  s.connect(hp);hp.connect(lp);lp.connect(env);env.connect(bandDry);env.connect(bandRev);
+  if(Math.random()<0.4){                                  // faint metallic shimmer
+    const o=AC.createOscillator();o.type='triangle';
+    o.frequency.value=4100+rand(-150,150);
+    const pe=AC.createGain();
+    pe.gain.setValueAtTime(0.0001,t);
+    pe.gain.exponentialRampToValueAtTime(vel*0.01,t+0.01);
+    pe.gain.exponentialRampToValueAtTime(0.0001,t+0.35);
+    o.connect(pe);pe.connect(bandDry);o.start(t);o.stop(t+0.4);
+  }
+}
+function hat(t,vel){
+  const s=noiseSrc(t,0.1);
+  const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=6200;
+  const lp=AC.createBiquadFilter();lp.type='lowpass';lp.frequency.value=10000;
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.04,t+0.007);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.07);
+  s.connect(hp);hp.connect(lp);lp.connect(env);env.connect(bandDry);
+}
+function snare(t,vel){
+  const s=noiseSrc(t,0.15);
+  const bp=AC.createBiquadFilter();bp.type='bandpass';bp.frequency.value=1900;bp.Q.value=0.9;
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.4,t+0.003);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.1);
+  s.connect(bp);bp.connect(env);env.connect(bandDry);env.connect(bandRev);
+  const o=AC.createOscillator();o.type='triangle';o.frequency.value=195;
+  const te=AC.createGain();
+  te.gain.setValueAtTime(0.0001,t);
+  te.gain.exponentialRampToValueAtTime(vel*0.15,t+0.003);
+  te.gain.exponentialRampToValueAtTime(0.0001,t+0.07);
+  o.connect(te);te.connect(bandDry);o.start(t);o.stop(t+0.1);
+}
+function crash(t,vel){
+  // a wide bright cymbal wash — used for the up-flick band hit (キメ)
+  const s=noiseSrc(t,1.4);
+  const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=2600;
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.32,t+0.008);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+1.3);
+  s.connect(hp);hp.connect(env);env.connect(bandDry);env.connect(bandRev);
+}
+function kick(t,vel){
+  const o=AC.createOscillator();o.type='sine';
+  o.frequency.setValueAtTime(92,t);
+  o.frequency.exponentialRampToValueAtTime(46,t+0.08);
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.6,t+0.004);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.13);
+  o.connect(env);env.connect(bandDry);o.start(t);o.stop(t+0.16);
+}
+function bassPluck(t,midi,vel,dur){
+  const f=mtof(midi);
+  const o1=AC.createOscillator();o1.type='sine';o1.frequency.value=f;
+  const o2=AC.createOscillator();o2.type='triangle';o2.frequency.value=f;o2.detune.value=3;
+  const g2=AC.createGain();g2.gain.value=0.7;
+  const flt=AC.createBiquadFilter();flt.type='lowpass';flt.Q.value=0.6;
+  flt.frequency.setValueAtTime(900,t);
+  flt.frequency.exponentialRampToValueAtTime(450,t+0.25);
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.34,t+0.01);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+dur*1.05);
+  o1.connect(flt);o2.connect(g2);g2.connect(flt);flt.connect(env);env.connect(bandDry);
+  o1.start(t);o2.start(t);o1.stop(t+dur*1.1);o2.stop(t+dur*1.1);
+  const th=noiseSrc(t,0.04);                              // the thump of the finger
+  const lp=AC.createBiquadFilter();lp.type='lowpass';lp.frequency.value=260;
+  const te=AC.createGain();
+  te.gain.setValueAtTime(0.0001,t);
+  te.gain.exponentialRampToValueAtTime(vel*0.12,t+0.003);
+  te.gain.exponentialRampToValueAtTime(0.0001,t+0.035);
+  th.connect(lp);lp.connect(te);te.connect(bandDry);
+}
+/* light comping stab — upper structure of the chord, played short & soft */
+function comp(c,t,vel){
+  const notes=c.voicing.slice(2);                         // skip the bass-register tones
+  notes.forEach((m,i)=>{
+    const tt=t+i*0.014;                                   // a gentle roll
+    const f=mtof(m);
+    const o1=AC.createOscillator();o1.type='triangle';o1.frequency.value=f;
+    const o2=AC.createOscillator();o2.type='sawtooth';o2.frequency.value=f;o2.detune.value=-4;
+    const g2=AC.createGain();g2.gain.value=0.12;
+    const flt=AC.createBiquadFilter();flt.type='lowpass';flt.frequency.value=2200;flt.Q.value=0.4;
+    const env=AC.createGain();
+    env.gain.setValueAtTime(0.0001,tt);
+    env.gain.exponentialRampToValueAtTime(vel*0.05,tt+0.01);
+    env.gain.exponentialRampToValueAtTime(0.0001,tt+0.9);
+    o1.connect(flt);o2.connect(g2);g2.connect(flt);flt.connect(env);
+    env.connect(bandDry);env.connect(bandRev);
+    o1.start(tt);o2.start(tt);o1.stop(tt+1);o2.stop(tt+1);
+  });
+}
+
+/* walking upright bass over the CURRENT chord: root on the one, scale
+   steps between, chromatic approaches back into the next root */
+const lowNear=(pc,ref)=>{
+  let best=null,bd=99;
+  for(let m=26;m<=46;m++)if(((m%12)+12)%12===pc){
+    const d=Math.abs(m-ref);if(d<bd){bd=d;best=m;}
+  }
+  return best??ref;
+};
+function bassNoteFor(b){
+  const rootPc=chord.tones[0];
+  if(b===0){                                              // the one: root, sometimes the fifth
+    bassCur=lowNear(Math.random()<0.8?rootPc:(chord.tones[2]??rootPc),bassCur);
+  }else if(b===CONFIG.beatsPerBar-1){                     // approach the next downbeat
+    const tgt=lowNear(rootPc,bassCur);
+    bassCur=Math.random()<0.5
+      ?clamp(tgt+(Math.random()<0.5?1:-1),26,46)          // chromatic from above/below
+      :clamp(scaleStep(bassCur,Math.sign(tgt-bassCur)||1),26,46);
+  }else{                                                  // walk by scale steps
+    const tgt=lowNear(rootPc,bassCur);
+    const dir=Math.random()<0.55?(Math.random()<0.5?1:-1):(Math.sign(tgt-bassCur)||1);
+    bassCur=clamp(scaleStep(bassCur,dir*(Math.random()<0.8?1:2)),26,46);
+  }
+  return bassCur;
+}
+
+/* is the band sounding right now? The left hand can hush it: a hold
+   (間) suspends it, a down-flick (ドロップ) pulls it back for a bar.
+   The lead and the chord pad keep going regardless. */
+function bandPlaying(){ return !suspended && Transport.beat>=dropUntilBeat; }
+
+/* one beat of the trio, all events placed relative to beat time t.
+   `temperature` (left-hand vertical swipe) heats the density up & down. */
+function scheduleBeat(t,beatInBar){
+  if(!bandPlaying()) return;
+  const b=beatInBar;
+  const BEAT=Transport.beatDur;
+  const off=BEAT*CONFIG.swing;                            // the swung "and"
+  const j=()=>t+rand(-0.006,0.006);                       // human micro-timing
+  const backbeat=(b===1||b===3);
+  const h=temperature;                                    // 0 cool … 1 boiling
+  const more=v=>clamp(v*(0.45+1.3*h),0,1);               // heat opens the density up
+
+  // ride: quarter on every beat, swung skip on 2 & 4 (and more, hotter)
+  if(Math.random()<0.97) ride(j(),backbeat?0.95:0.72);
+  if(backbeat){ if(Math.random()<CONFIG.rideSkipProb) ride(t+off+rand(-0.006,0.006),0.5); }
+  else if(Math.random()<more(CONFIG.rideExtraSkipProb)) ride(t+off,0.4);
+
+  // brushed hat on 2 & 4
+  if(backbeat) hat(j(),1);
+
+  // brushed ghost + comp accents on the snare
+  if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22));
+  if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6));
+
+  // feathered + occasional push kick (pushes appear as it heats up)
+  if(b===0&&Math.random()<CONFIG.featherKickProb) kick(j(),0.16);
+  if(Math.random()<more(CONFIG.kickPushProb)) kick(t+off,rand(0.22,0.36));
+
+  // walking bass — doubles into skip notes when hot
+  if(Math.random()<CONFIG.bassWalkProb){
+    bassPluck(j(),bassNoteFor(b),b===0?0.9:rand(0.6,0.85),BEAT);
+    if(Math.random()<more(0.12)) bassPluck(t+off,bassCur,0.32,BEAT/3);  // skipped triplet ghost
+  }
+}
+
+/* ================================================================
+   TRANSPORT — the single musical clock. A 25ms look-ahead loop
+   reserves every beat up to `lookahead` seconds ahead and fires the
+   bar / phrase hooks that drive harmony and (later) the BandBrain.
+   ================================================================ */
+const Transport = {
+  running:false, timer:null,
+  beatDur:0, nextBeatTime:0, beat:0,
+
+  start(){
+    this.beatDur=60/CONFIG.bpm;
+    this.nextBeatTime=AC.currentTime+0.08;
+    this.beat=0;
+    bassCur=lowNear(chord.tones[0],36);
+    this.running=true;
+    this.timer=setInterval(()=>this.tick(),CONFIG.schedulerInterval);
+  },
+  stop(){ clearInterval(this.timer); this.timer=null; this.running=false; },
+
+  tick(){
+    while(this.nextBeatTime < AC.currentTime + CONFIG.lookahead){
+      const t=this.nextBeatTime, b=this.beat;
+      const beatInBar=b%CONFIG.beatsPerBar;
+      const bar=Math.floor(b/CONFIG.beatsPerBar);
+
+      if(beatInBar===0) this.onBar(t,bar);
+      this.onBeat(t,beatInBar,bar);
+      scheduleVisualPulse(t,beatInBar);
+
+      this.nextBeatTime+=this.beatDur;
+      this.beat++;
+    }
+  },
+
+  onBar(t,bar){
+    // a queued progression switch (left-hand horizontal swipe) slides in on
+    // the phrase boundary — never abruptly, always at a musical seam
+    if(pendingProg!==null && bar%CONFIG.barsPerPhrase===0){
+      progIdx=pendingProg; CHORDS=PROGRESSIONS[progIdx].chords; pendingProg=null;
+      chordIdx=0; setChord(0,t);
+    }else if(bar>0 && bar%CONFIG.chordChangeEveryBars===0){
+      advanceChord(t);                                    // ordinary chord drift, bar-quantized
+    }
+
+    // breathing comping stab near the top of the bar (denser when hot)
+    if(bandPlaying() && Math.random()<clamp(CONFIG.compProb*(0.5+1.0*temperature),0,1))
+      comp(chord,t+rand(0,0.02),rand(0.7,1));
+  },
+
+  onBeat(t,beatInBar,bar){
+    scheduleBeat(t,beatInBar);
+  },
+};
+
+/* ================================================================
+   RIGHT HAND — the voice. One finger, vertical = register. The pitch
+   is always snapped to the chord's available notes, so it can never
+   miss (constraint #4). Down = immediate sound; a slide glides the
+   sustaining voice (portamento); lift = a soft decay tail. Horizontal
+   motion is NOT pitch — it is articulation (brightness + vibrato).
+   ================================================================ */
+
+/* snap a continuous target to the nearest available note, biased toward
+   chord tones, with a hair of random waver so it breathes like a player.
+   Pitch depends ONLY on the vertical target — never on x. */
+function snapToAvailable(target){
+  const lo=CONFIG.leadLo, hi=CONFIG.leadHi;
+  let best=null, score=-1e9;
+  for(let m=Math.round(target)-4;m<=Math.round(target)+4;m++){
+    if(m<lo||m>hi) continue;
+    if(!inScale(m)) continue;
+    let s=-Math.abs(target-m)*1.1;
+    if(isTonePc(m)) s+=CONFIG.chordToneWeight;
+    s+=Math.random()*CONFIG.snapWaver;
+    if(s>score){ score=s; best=m; }
+  }
+  return best ?? clamp(Math.round(target),lo,hi);
+}
+const yToMidi = y01 => CONFIG.leadHi - y01*(CONFIG.leadHi-CONFIG.leadLo);
+
+/* a sustained, vocal lead voice: triangle+saw with a vibrato LFO,
+   held while the finger is down, glided across the neck on slides */
+function createLeadVoice(midi,x01){
+  const t=AC.currentTime, f=mtof(midi);
+  const o1=AC.createOscillator(); o1.type='triangle';
+  const o2=AC.createOscillator(); o2.type='sawtooth';
+  o1.frequency.value=f; o2.frequency.value=f;
+  o1.detune.value=3; o2.detune.value=-4;
+  const g2=AC.createGain(); g2.gain.value=lerp(0.08,0.55,x01);   // edge from articulation
+  const flt=AC.createBiquadFilter(); flt.type='lowpass'; flt.Q.value=1.0;
+  flt.frequency.value=lerp(900,4200,x01);
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(0.22,t+CONFIG.leadAttack);
+  // vibrato — depth opened live by horizontal motion (see leadMove)
+  const lfo=AC.createOscillator(); lfo.type='sine'; lfo.frequency.value=CONFIG.leadVibratoHz;
+  const lfoGain=AC.createGain(); lfoGain.gain.value=0;
+  lfo.connect(lfoGain); lfoGain.connect(o1.detune); lfoGain.connect(o2.detune);
+  o1.connect(flt); o2.connect(g2); g2.connect(flt); flt.connect(env); env.connect(leadInput);
+  o1.start(t); o2.start(t); lfo.start(t);
+  return {o1,o2,g2,flt,env,lfo,lfoGain,midi,born:t};
+}
+function glideLeadTo(v,midi){                       // legato slide
+  const f=mtof(midi), t=AC.currentTime;
+  v.o1.frequency.setTargetAtTime(f,t,CONFIG.leadPortamento);
+  v.o2.frequency.setTargetAtTime(f,t,CONFIG.leadPortamento);
+  v.midi=midi;
+}
+function rearticulateLead(v,midi,x01){              // a fresh attack for a deliberate leap
+  const f=mtof(midi), t=AC.currentTime;
+  v.o1.frequency.setValueAtTime(f,t); v.o2.frequency.setValueAtTime(f,t);
+  v.env.gain.cancelScheduledValues(t);
+  v.env.gain.setValueAtTime(Math.max(v.env.gain.value,0.0001),t);
+  v.env.gain.exponentialRampToValueAtTime(0.05,t+0.02);
+  v.env.gain.exponentialRampToValueAtTime(0.22,t+0.02+CONFIG.leadAttack);
+  v.midi=midi;
+}
+function releaseLead(v){
+  const t=AC.currentTime;
+  v.env.gain.cancelScheduledValues(t);
+  v.env.gain.setValueAtTime(Math.max(v.env.gain.value,0.0001),t);
+  // a tap that lifts before the attack finishes would otherwise be pinned near
+  // zero (silent) — so let a young voice bloom to a quick peak first: a plucked blip
+  let bloom=0;
+  if((t-v.born)<CONFIG.leadAttack){
+    bloom=0.012;
+    v.env.gain.exponentialRampToValueAtTime(0.22,t+bloom);
+  }
+  v.env.gain.exponentialRampToValueAtTime(0.0001,t+bloom+CONFIG.leadRelease);
+  const end=t+bloom+CONFIG.leadRelease+0.1;
+  v.o1.stop(end); v.o2.stop(end); v.lfo.stop(end);
+}
+
+const lead={ pid:null, x:0, y:0, lastT:0, speed:0, hSpeed:0, pressure:0, voice:null };
+let lastLeadMidi=null;   // the most recent note — held in the HUD after the finger lifts
+
+function leadDown(e){
+  if(!AC || lead.pid!==null) return;               // mono lead for now (left-hand zone = phase 3)
+  lead.pid=e.pointerId; lead.x=e.clientX; lead.y=e.clientY;
+  lead.lastT=performance.now(); lead.speed=0; lead.hSpeed=0; lead.pressure=e.pressure||0;
+  const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
+  const midi=snapToAvailable(yToMidi(y01));
+  lead.voice=createLeadVoice(midi,x01); lastLeadMidi=midi;
+  leadTrail.length=0; pushTrail(e.clientX,e.clientY);
+  ripple(x01,y01,midi);
+}
+function leadMove(e){
+  if(!AC || lead.pid!==e.pointerId || !lead.voice) return;
+  const now=performance.now(), dt=Math.max(now-lead.lastT,1);
+  const dx=e.clientX-lead.x, dy=e.clientY-lead.y;
+  lead.speed=Math.hypot(dx,dy)/dt; lead.hSpeed=Math.abs(dx)/dt;
+  lead.pressure=e.pressure||0;
+  lead.x=e.clientX; lead.y=e.clientY; lead.lastT=now;
+
+  const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
+  const midi=snapToAvailable(yToMidi(y01));
+  lastLeadMidi=midi;
+  if(midi!==lead.voice.midi){
+    // a wide, fast jump speaks anew; everything else slides (legato)
+    const leap=Math.abs(midi-lead.voice.midi)>=CONFIG.leadLeapSemitones && lead.speed>=CONFIG.leadLeapSpeed;
+    if(leap){ rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi); }
+    else glideLeadTo(lead.voice,midi);
+  }
+  // horizontal motion = articulation: open vibrato & brightness
+  const t=AC.currentTime;
+  const artic=clamp(lead.hSpeed*1.6,0,1);
+  lead.voice.lfoGain.gain.setTargetAtTime(artic*CONFIG.leadVibratoMaxCents,t,0.08);
+  lead.voice.flt.frequency.setTargetAtTime(lerp(900,5200,artic),t,0.05);
+  pushTrail(e.clientX,e.clientY);
+}
+function leadUp(e){
+  if(lead.pid!==e.pointerId) return;
+  if(lead.voice) releaseLead(lead.voice);
+  lead.voice=null; lead.pid=null; lead.speed=0; lead.hSpeed=0;
+}
+
+/* leadIntensity = finger speed + register (+ pressure when the device
+   reports it). Smoothed, and it decays to zero once the finger lifts.
+   It also drives the lead's own saturation (the band reacts in phase 4). */
+function updateIntensity(){
+  if(lead.pid!==null && lead.voice){
+    const pitch01=clamp((lead.voice.midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo),0,1);
+    const spd=clamp(lead.speed/CONFIG.intensitySpeedRef,0,1);
+    const w=CONFIG.intensityWeights;
+    let num=spd*w.speed + pitch01*w.height, den=w.speed+w.height;
+    if(lead.pressure>0){ num+=lead.pressure*w.pressure; den+=w.pressure; }
+    const target=num/den;
+    leadIntensity += (target-leadIntensity)*CONFIG.intensityAttack;
+    lead.speed*=0.85; lead.hSpeed*=0.85;             // settle when the finger holds still
+  }else{
+    leadIntensity += (0-leadIntensity)*CONFIG.intensityDecay;
+  }
+  if(leadDrive) leadDrive.gain.setTargetAtTime(
+    lerp(CONFIG.leadSatBase,CONFIG.leadSatMax,leadIntensity), AC.currentTime, 0.1);
+}
+
+/* ================================================================
+   LEFT HAND — intent, four gestures, no buttons. Operated in the
+   bottom-left zone. The crux is telling them apart: a slow vertical
+   drag is TEMPERATURE (continuous), a sharp vertical flick is a
+   one-shot HIT/DROP — same direction, split by velocity. A still
+   finger is HOLD (間); a horizontal sweep queues a PROGRESSION change.
+   ================================================================ */
+const C=CONFIG.leftHand;
+const flash={a:0,kind:''};       // momentary screen feedback for discrete events
+let suspendViz=0;                 // eased darkening while the band is held
+
+// debug HUD — records the last gesture; the live state line is built in frame()
+const dbgEl=document.getElementById('dbg');
+if(CONFIG.debug && dbgEl) dbgEl.style.display='block';
+let dbgAction='—';
+function dbg(s){ dbgAction=s; }
+
+function inLeftZone(x,y){ return x < W*C.zoneW && y > H*C.zoneTop; }
+
+const left={ pid:null, mode:'idle', x:0,y:0, x0:0,y0:0, lastT:0, t0:0,
+             peakVel:0, sumX:0, sumY:0, maxDisp:0, tempApplied:0, holdTimer:null };
+
+function leftDown(e){
+  left.pid=e.pointerId; left.mode='undecided';
+  left.x=left.x0=e.clientX; left.y=left.y0=e.clientY;
+  left.lastT=left.t0=performance.now();
+  left.peakVel=0; left.sumX=0; left.sumY=0; left.maxDisp=0; left.tempApplied=0;
+  clearTimeout(left.holdTimer);
+  // a finger that lands and lingers, barely moving, is a hold — the band breathes out
+  left.holdTimer=setTimeout(()=>{
+    if(left.mode==='undecided' && left.maxDisp<C.HOLD_DRIFT){ left.mode='hold'; suspended=true; dbg('HOLD ◼ suspend'); }
+  }, C.HOLD_MS);
+}
+function leftMove(e){
+  if(left.pid!==e.pointerId) return;
+  const now=performance.now(), dt=Math.max(now-left.lastT,1);
+  const dx=e.clientX-left.x, dy=e.clientY-left.y;
+  const vel=Math.hypot(dx,dy)/dt;                         // px/ms — the discriminator
+  left.peakVel=Math.max(left.peakVel,vel);
+  left.x=e.clientX; left.y=e.clientY; left.lastT=now;
+  left.sumX=e.clientX-left.x0; left.sumY=e.clientY-left.y0;
+  left.maxDisp=Math.max(left.maxDisp,Math.hypot(left.sumX,left.sumY));
+
+  if(left.mode==='hold'||left.mode==='hswipe') return;    // already committed this gesture
+
+  const horiz=Math.abs(left.sumX)>Math.abs(left.sumY)*C.AXIS_RATIO;
+  const vert =Math.abs(left.sumY)>Math.abs(left.sumX)*C.AXIS_RATIO;
+
+  // horizontal sweep → queue a progression change for the next phrase boundary
+  if(horiz && Math.abs(left.sumX)>C.HSWIPE_MIN_DISP){
+    temperature=clamp(temperature-left.tempApplied,0,1); left.tempApplied=0;  // undo stray heat
+    left.mode='hswipe';
+    queueProgression(left.sumX>0?+1:-1);
+    return;
+  }
+  // a SLOW vertical drag is temperature (live & continuous). A FAST vertical
+  // stroke fails this speed gate, so it stays UNDECIDED and can become a flick
+  // at release — this is exactly how the two are kept from misfiring.
+  if(vert && vel<C.FLICK_VEL){
+    left.mode='temp';
+    const d=(-dy)/H*C.TEMP_SENSITIVITY;                   // up = hotter, down = cooler
+    temperature=clamp(temperature+d,0,1);
+    left.tempApplied+=d;
+    dbg('TEMP '+(d>=0?'▲':'▼')+' '+temperature.toFixed(2));
+  }
+}
+function leftUp(e){
+  if(left.pid!==e.pointerId) return;
+  clearTimeout(left.holdTimer);
+  const contact=performance.now()-left.t0;
+  if(left.mode==='hold'){
+    suspended=false; dbg('HOLD release');                  // release the held breath
+  }else if(left.mode!=='hswipe'){
+    // A flick winds up from rest, so its first samples are slow and may have
+    // tipped us into 'temp' — that's fine. We still test for a flick at release,
+    // judged mainly by PEAK speed (a slow temperature drag never spikes), and if
+    // it IS a flick we roll back any heat it applied on the way. This is how the
+    // two coexist: temperature stays live, the flick still gets through.
+    const isFlick = left.peakVel>=C.FLICK_VEL && contact<=C.FLICK_MAX_MS
+                 && Math.abs(left.sumY)>=C.FLICK_MIN_DISP
+                 && Math.abs(left.sumY)>Math.abs(left.sumX);
+    if(isFlick){
+      temperature=clamp(temperature-left.tempApplied,0,1); // a flick must not also boil the band
+      if(left.sumY<0) fireKime(); else fireDrop();         // up = hit, down = drop
+    }
+  }
+  left.pid=null; left.mode='idle';
+}
+
+/* ---- gesture effects (the band's full interpretation arrives in phase 4) ---- */
+function queueProgression(dir){
+  const n=PROGRESSIONS.length;
+  pendingProg=((progIdx+dir)%n+n)%n;
+  confirmTick();                                           // a soft rising shimmer = "received"
+  dbg('SWIPE '+(dir>0?'▶':'◀')+' → '+PROGRESSIONS[pendingProg].name);
+}
+function fireKime(){
+  if(!AC) return;
+  const t=AC.currentTime+0.02;                             // immediate one-shot — responsiveness over the grid
+  crash(t,1); kick(t,0.7); snare(t,0.75); comp(chord,t,1);
+  flash.kind='kime'; flash.a=0.5;
+  dbg('FLICK ▲ → KIME');
+}
+function fireDrop(){
+  dropUntilBeat=Transport.beat+CONFIG.beatsPerBar*C.dropBars; // band pulls back, lead left alone
+  flash.kind='drop'; flash.a=0.4;
+  dbg('FLICK ▼ → DROP');
+}
+function confirmTick(){
+  if(!AC) return;
+  const t=AC.currentTime+0.01;
+  const o=AC.createOscillator(); o.type='sine';
+  o.frequency.setValueAtTime(740,t); o.frequency.exponentialRampToValueAtTime(1180,t+0.16);
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(0.045,t+0.02);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.24);
+  o.connect(env); env.connect(bandRev); env.connect(bandDry);
+  o.start(t); o.stop(t+0.28);
+}
+
+/* ================================================================
+   VISUALS (phase-1 minimal) — a dark room that breathes with the
+   chord tension and blooms softly on every beat, so you can see the
+   band is alive. The signature lead-trail visuals come in phase 5.
+   ================================================================ */
+const cv=document.getElementById('stage'), cx=cv.getContext('2d');
+let W=0,H=0,DPR=1;
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  W=window.innerWidth;H=window.innerHeight;
+  cv.width=W*DPR;cv.height=H*DPR;
+  cv.style.width=W+'px';cv.style.height=H+'px';
+  cx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize',resize);resize();
+
+let bgTension=0.2, bgTensionTarget=0.2;
+const pulses=[];
+const leadTrail=[];   // the line you are singing — the signature visual
+const ripples=[];     // a ring at each note onset / leap
+
+function pushTrail(x,y){ leadTrail.push({x,y,t:performance.now()}); if(leadTrail.length>120) leadTrail.shift(); }
+function ripple(x01,y01,midi){
+  const p01=clamp((midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo),0,1);
+  ripples.push({x:x01*W,y:y01*H,r:6,maxR:lerp(40,150,p01),a:0.8});
+}
+
+/* schedule a visual bloom to fire at the same audio time as the beat */
+function scheduleVisualPulse(t,beatInBar){
+  const delay=Math.max(0,(t-AC.currentTime)*1000);
+  setTimeout(()=>{
+    const downbeat=beatInBar===0;
+    pulses.push({r:downbeat?40:24, a:downbeat?0.5:0.28, max:downbeat?Math.max(W,H)*0.5:Math.max(W,H)*0.28});
+  },delay);
+}
+
+function frame(){
+  const now=performance.now();
+  if(AC) updateIntensity();
+  bgTension+=(bgTensionTarget-bgTension)*0.01;
+  const warm=1-bgTension;
+  const g=cx.createRadialGradient(W/2,H*0.62,0,W/2,H*0.62,Math.max(W,H)*0.85);
+  g.addColorStop(0,`rgb(${(10+5*warm)|0},${(11+2*warm)|0},${(26+6*bgTension)|0})`);
+  g.addColorStop(1,`rgb(4,5,${(11+4*bgTension)|0})`);
+  cx.fillStyle=g;cx.fillRect(0,0,W,H);
+
+  // temperature — the edges take on heat (warm) as the left hand swipes up
+  if(temperature>0.01){
+    const eg=cx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.28,W/2,H/2,Math.max(W,H)*0.72);
+    eg.addColorStop(0,'rgba(0,0,0,0)');
+    eg.addColorStop(1,`rgba(255,${(150-temperature*70)|0},50,${temperature*0.30})`);
+    cx.fillStyle=eg;cx.fillRect(0,0,W,H);
+  }
+
+  // soft concentric blooms from the centre on each beat
+  for(let i=pulses.length-1;i>=0;i--){
+    const p=pulses[i];
+    p.r+=(p.max-p.r)*0.05; p.a*=0.94;
+    if(p.a<0.01){pulses.splice(i,1);continue;}
+    const col=lerp(255,180,bgTension)|0, blu=lerp(120,255,bgTension)|0;
+    cx.beginPath();cx.arc(W/2,H*0.62,p.r,0,7);
+    cx.strokeStyle=`rgba(${col},${lerp(200,212,bgTension)|0},${blu},${p.a})`;
+    cx.lineWidth=1.4;cx.stroke();
+  }
+
+  // lead colour runs hotter (amber→near-red) as leadIntensity rises
+  const lr=255, lg=lerp(220,150,leadIntensity)|0, lb=lerp(150,60,leadIntensity)|0;
+
+  // note-onset rings
+  for(let i=ripples.length-1;i>=0;i--){
+    const r=ripples[i]; r.r+=(r.maxR-r.r)*0.06; r.a*=0.95;
+    if(r.a<0.02){ripples.splice(i,1);continue;}
+    cx.beginPath();cx.arc(r.x,r.y,r.r,0,7);
+    cx.strokeStyle=`rgba(${lr},${lg},${lb},${r.a})`;cx.lineWidth=1.5;cx.stroke();
+  }
+
+  // the sung line — a fading thread, thicker & hotter with intensity
+  while(leadTrail.length && now-leadTrail[0].t>1200) leadTrail.shift();
+  if(leadTrail.length>1){
+    cx.lineCap='round'; cx.lineJoin='round';
+    for(let i=1;i<leadTrail.length;i++){
+      const p0=leadTrail[i-1], p1=leadTrail[i];
+      const age=(now-p1.t)/1100; if(age>=1) continue;
+      cx.strokeStyle=`rgba(${lr},${lg},${lb},${(1-age)*0.6})`;
+      cx.lineWidth=lerp(1,4,1-age)*lerp(1,1.8,leadIntensity);
+      cx.beginPath();cx.moveTo(p0.x,p0.y);cx.lineTo(p1.x,p1.y);cx.stroke();
+    }
+  }
+  // fingertip glow while singing
+  if(lead.pid!==null && lead.voice && leadTrail.length){
+    const tip=leadTrail[leadTrail.length-1];
+    cx.beginPath();cx.arc(tip.x,tip.y,lerp(6,16,leadIntensity),0,7);
+    cx.fillStyle=`rgba(${lr},${lg},${lb},0.85)`;
+    cx.shadowColor='rgba(255,179,92,0.9)'; cx.shadowBlur=lerp(10,28,leadIntensity);
+    cx.fill(); cx.shadowBlur=0;
+  }
+
+  // 間 (hold) — the room sinks into darkness while the band holds its breath
+  suspendViz += ((suspended?1:0)-suspendViz)*0.08;
+  if(suspendViz>0.01){ cx.fillStyle=`rgba(2,3,9,${suspendViz*0.55})`; cx.fillRect(0,0,W,H); }
+
+  // a queued progression change shimmers along the bottom edge until it lands
+  if(pendingProg!==null){
+    const a=0.25+0.18*Math.sin(now/180);
+    cx.fillStyle=`rgba(150,200,255,${a})`; cx.fillRect(0,H-4,W,4);
+  }
+
+  // discrete event flash — bright for a hit (キメ), a dark sink for a drop (ドロップ)
+  if(flash.a>0.01){
+    flash.a*=0.9;
+    cx.fillStyle = flash.kind==='kime'
+      ? `rgba(255,232,184,${flash.a})`
+      : `rgba(150,210,235,${flash.a})`;    // pale cyan — a cool lift, in the app's blue accent tone
+    cx.fillRect(0,0,W,H);
+  }
+
+  // debug HUD — last gesture + the resulting state it changed
+  if(CONFIG.debug && dbgEl){
+    const dropOn = AC && Transport.beat<dropUntilBeat;
+    const leadNote = lastLeadMidi!==null ? midiName(lastLeadMidi) : '—';
+    dbgEl.textContent =
+      '▸ '+dbgAction+'\n'+
+      'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+(dropOn?'  DROP':'')+'\n'+
+      'prog '+PROGRESSIONS[progIdx].name+'\n'+
+      'chord '+chord.name+'\n'+
+      'lead '+leadNote+'  i'+leadIntensity.toFixed(2);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ================================================================
+   ENTRY — the tap unlocks the AudioContext and starts the band.
+   ================================================================ */
+const veil=document.getElementById('veil');
+function start(){
+  if(AC) return;
+  buildAudio();
+  if(AC.state==='suspended') AC.resume();
+  veil.classList.add('gone');
+  setChord(0, AC.currentTime+0.06);   // lay down the first chord bed
+  Transport.start();                  // …and let the trio run itself
+}
+document.getElementById('enter').addEventListener('click',start);
+veil.addEventListener('pointerdown',start);
+
+/* two-thumbs routing: a touch starting in the bottom-left zone is the left
+   hand (intent); everything else is the voice. Both can be down at once.
+   Routing thereafter is by pointerId, and capture keeps slides tracked. */
+function routeDown(e){
+  e.preventDefault();
+  try{ cv.setPointerCapture(e.pointerId); }catch(_){}   // capture can fail on odd pointers; harmless
+  if(left.pid===null && inLeftZone(e.clientX,e.clientY)) leftDown(e);
+  else leadDown(e);
+}
+function routeMove(e){
+  e.preventDefault();
+  if(e.pointerId===left.pid) leftMove(e);
+  else if(e.pointerId===lead.pid) leadMove(e);
+}
+function routeEnd(e){
+  if(e.pointerId===left.pid) leftUp(e);
+  else if(e.pointerId===lead.pid) leadUp(e);
+}
+cv.addEventListener('pointerdown',routeDown);
+cv.addEventListener('pointermove',routeMove);
+cv.addEventListener('pointerup',routeEnd);
+cv.addEventListener('pointercancel',routeEnd);
+</script>
+</body>
+</html>
