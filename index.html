@@ -32,6 +32,82 @@
     pointer-events:none;text-shadow:0 0 6px rgba(0,0,0,.85);
   }
 
+  /* ---------- settings: a small gold dot opens a minimal overlay ---------- */
+  /* hit area is larger than the visible dot: 40px transparent box, ~5.5px dot centered via ::after */
+  #gear{
+    position:fixed;right:6px;bottom:calc(6px + env(safe-area-inset-bottom));z-index:7;
+    width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+    cursor:pointer;-webkit-tap-highlight-color:transparent;
+  }
+  #gear::after{
+    content:"";width:5.5px;height:5.5px;border-radius:50%;
+    background:rgba(232,213,163,.45);box-shadow:0 0 9px rgba(255,179,92,.35);
+    transition:background .3s,box-shadow .3s,transform .3s;
+  }
+  #gear:hover::after{background:rgba(232,213,163,.9);box-shadow:0 0 14px rgba(255,179,92,.6);transform:scale(1.15);}
+  #settings{
+    position:fixed;inset:0;z-index:9;display:none;
+    flex-direction:column;align-items:center;justify-content:center;gap:26px;
+    background:radial-gradient(ellipse at 50% 55%,rgba(8,9,20,.94),rgba(4,5,12,.97));
+    color:var(--gold);text-align:center;padding:32px;
+    -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);
+  }
+  #settings.open{display:flex;}
+  .srow{
+    display:flex;align-items:center;justify-content:space-between;
+    width:min(82vw,360px);gap:24px;
+    font-size:11px;letter-spacing:.18em;color:rgba(232,213,163,.85);
+    padding:9px 2px;border-bottom:1px solid rgba(232,213,163,.12);
+  }
+  .srow .tog{
+    font-size:10px;letter-spacing:.22em;color:rgba(232,213,163,.5);
+    border:1px solid rgba(232,213,163,.3);border-radius:2px;padding:4px 11px;
+    cursor:pointer;transition:all .25s;min-width:48px;text-align:center;
+  }
+  .srow .tog.on{color:var(--ink);background:var(--gold);border-color:var(--gold);box-shadow:0 0 12px rgba(255,179,92,.5);}
+  /* close = thin X sitting where the gold dot is (same 40px hit box, corner-aligned) */
+  #settingsClose{
+    position:fixed;right:6px;bottom:calc(6px + env(safe-area-inset-bottom));z-index:10;
+    width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+    font-family:inherit;font-weight:200;font-size:17px;line-height:1;
+    color:rgba(232,213,163,.55);cursor:pointer;-webkit-tap-highlight-color:transparent;
+    transition:color .3s,transform .3s;
+  }
+  #settingsClose:hover{color:rgba(232,213,163,.95);transform:scale(1.1);}
+  .srow .tog:focus{outline:none;}
+
+  /* ---------- interactive tutorial — a top card; the canvas stays playable beneath it ---------- */
+  #tutorial{
+    position:fixed;left:0;right:0;top:0;z-index:8;display:none;
+    flex-direction:column;align-items:center;
+    padding:calc(18px + env(safe-area-inset-top)) 18px 0;
+    pointer-events:none;text-align:center;   /* touches fall through to the canvas… */
+  }
+  #tutorial.open{display:flex;}
+  #tutorial .card{
+    pointer-events:auto;                      /* …except the card itself */
+    width:min(86vw,420px);
+    background:rgba(8,9,20,.82);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
+    border:1px solid rgba(232,213,163,.16);border-radius:7px;
+    padding:15px 20px 14px;color:var(--gold);box-shadow:0 10px 44px rgba(0,0,0,.5);
+  }
+  #tutorial .step{font-size:8.5px;letter-spacing:.32em;text-transform:uppercase;color:rgba(232,213,163,.48);margin-bottom:7px;}
+  #tutorial .ttl{font-size:15px;letter-spacing:.08em;color:rgba(232,213,163,.96);margin-bottom:7px;}
+  #tutorial .txt{font-size:12px;line-height:1.65;letter-spacing:.03em;color:rgba(232,213,163,.74);min-height:2.6em;}
+  #tutorial .txt.done{color:#a6e3b8;letter-spacing:.1em;}
+  #tutorial .dots{display:flex;gap:5px;justify-content:center;margin-top:13px;}
+  #tutorial .dots i{width:5px;height:5px;border-radius:50%;background:rgba(232,213,163,.2);transition:all .3s;}
+  #tutorial .dots i.on{background:rgba(232,213,163,.6);}
+  #tutorial .dots i.cur{background:var(--gold);box-shadow:0 0 8px rgba(255,179,92,.7);}
+  #tutorial .row{display:flex;gap:16px;justify-content:center;margin-top:13px;}
+  #tutorial .row button{
+    pointer-events:auto;background:transparent;border:1px solid rgba(232,213,163,.28);
+    border-radius:2px;color:var(--gold);font-family:inherit;font-size:9.5px;
+    letter-spacing:.26em;text-indent:.26em;padding:7px 15px;cursor:pointer;transition:all .25s;
+  }
+  #tutorial .row button:hover{background:rgba(232,213,163,.08);}
+  #tutorial .row button:focus{outline:none;}
+
   /* ---------- start overlay — the only UI, needed to unlock AudioContext ---------- */
   #veil{
     position:fixed;inset:0;z-index:10;
@@ -68,6 +144,25 @@
 <body>
 <canvas id="stage"></canvas>
 <div id="dbg"></div>
+<div id="gear" title="Settings"></div>
+<div id="settings">
+  <div class="srow"><span>HUD</span><span class="tog" id="tog-hud">OFF</span></div>
+  <div class="srow"><span>Tutorial</span><span class="tog" id="tut-start">START</span></div>
+  <div id="settingsClose" title="Close">✕</div>
+</div>
+
+<div id="tutorial">
+  <div class="card">
+    <div class="step" id="tut-step"></div>
+    <div class="ttl" id="tut-ttl"></div>
+    <div class="txt" id="tut-txt"></div>
+    <div class="dots" id="tut-dots"></div>
+    <div class="row">
+      <button id="tut-skip">SKIP</button>
+      <button id="tut-exit">EXIT</button>
+    </div>
+  </div>
+</div>
 
 <div id="veil">
   <h1>FILAMENT</h1>
@@ -989,7 +1084,7 @@ function leadDown(e){
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
   const midi=snapToAvailable(yToMidi(y01));
   lead.voice=createLeadVoice(midi,x01); lastLeadMidi=midi;
-  leadTrail.length=0; pushTrail(e.clientX,e.clientY);
+  breakTrail(); pushTrail(e.clientX,e.clientY);
   ripple(x01,y01,midi);
 }
 function leadMove(e){
@@ -1022,6 +1117,7 @@ function leadMove(e){
   const midi=snapToAvailable(yToMidi(y01));
   lastLeadMidi=midi;
   if(midi!==lead.voice.midi){
+    tutorialNotify('voice');                                // moving the pitch IS the voice lesson
     // a wide, fast jump speaks anew; everything else slides (legato)
     const leap=Math.abs(midi-lead.voice.midi)>=CONFIG.leadLeapSemitones && lead.speed>=CONFIG.leadLeapSpeed;
     if(leap){ rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi); }
@@ -1088,7 +1184,7 @@ function nearestTone(m){              // nearest chord tone either side of m
 /* visuals shared by both flick figures: short (no) trail, one cyan ring per outside
    note + the landing ring in the lead colour, and a blue-white particle burst */
 function flickVisuals(notes,landing){
-  leadTrail.length=0; ripples.length=0;
+  breakTrail(); ripples.length=0;
   const x01=clamp(lead.x/W,0,1);
   notes.forEach(m=>{
     const col = m===landing ? null : OUT_COL;
@@ -1098,6 +1194,7 @@ function flickVisuals(notes,landing){
 }
 function fireRightFlick(dir){
   if(!lead.voice) return;
+  tutorialNotify('rflick');
   const m=CONFIG.rightFlick.mode;
   if(m==='enclosure') flickEnclosure(dir);
   else if(m==='single') flickSingle(dir);
@@ -1119,8 +1216,8 @@ function flickSingle(dir){
   v.env.gain.exponentialRampToValueAtTime(0.24,t+0.016);     // sharp attack, then it just sustains
   v.midi=out; lastLeadMidi=out;
   leadIntensity=Math.max(leadIntensity,RF.intensityKick);
-  // the single note IS the outside note → cyan ring + particle burst, no trail
-  leadTrail.length=0; ripples.length=0;
+  // the single note IS the outside note → cyan ring + particle burst, no new trail
+  breakTrail(); ripples.length=0;
   ripple(clamp(lead.x/W,0,1),clamp((CONFIG.leadHi-out)/(CONFIG.leadHi-CONFIG.leadLo),0,1),out,OUT_COL);
   burstParticles(lead.x,lead.y,OUT_COL,26);
   dbg('R-SINGLE '+(dir>0?'▲':'▼')+' '+midiName(out));
@@ -1206,7 +1303,7 @@ function leftDown(e){
   left.holdTimer=setTimeout(()=>{
     if(left.mode==='undecided' && left.maxDisp<C.HOLD_DRIFT){
       temperature=left.tempStart;                          // a hold isn't a temp gesture — undo any micro-drift
-      left.mode='hold'; suspended=true; dbg('HOLD ◼ suspend');
+      left.mode='hold'; suspended=true; dbg('HOLD ◼ suspend'); tutorialNotify('hold');
     }
   }, C.HOLD_MS);
 }
@@ -1240,7 +1337,7 @@ function leftMove(e){
     left.mode='temp';
     const d=(-dy)/H*C.TEMP_SENSITIVITY;                   // up = hotter, down = cooler
     temperature=clamp(temperature+d,0,1);
-    dbg('TEMP '+(d>=0?'▲':'▼')+' '+temperature.toFixed(2));
+    dbg('TEMP '+(d>=0?'▲':'▼')+' '+temperature.toFixed(2)); tutorialNotify('temp');
   }
 }
 function leftUp(e){
@@ -1281,7 +1378,7 @@ function xToProgIndex(x){                                   // finger X → prog
 }
 function commitProgression(i){
   if(i===progIdx && pivotChord===null) { dbg('PROG = '+PROGRESSIONS[i].name); return; } // already here
-  pendingProg=i;                                            // the V7 pivot fires at the next chord boundary
+  pendingProg=i; tutorialNotify('swipe');                  // the V7 pivot fires at the next chord boundary
   const span=CONFIG.chordChangeEveryBars*CONFIG.beatsPerBar, P=beatPos();
   const pivotBeat=Math.ceil((P+0.001)/span)*span;          // next boundary = pivot starts
   gaugeFrom=P; gaugeTo=pivotBeat+span;                      // …dominant ends one slot later = destination
@@ -1296,7 +1393,7 @@ function fireHit(){
   const t=AC.currentTime+0.02;                             // immediate one-shot — responsiveness over the grid
   crash(t,0.55); kick(t,0.55); snare(t,0.6);               // percussion only — no pitched comp stab
   flash.kind='hit'; flash.a=0.30;
-  dbg('FLICK ▲ → HIT');
+  dbg('FLICK ▲ → HIT'); tutorialNotify('kime');
 }
 function fireBreak(){
   // left DOWN-flick — a BREAK: stop scheduling the dropped instruments (cymbals, or the
@@ -1307,14 +1404,14 @@ function fireBreak(){
   cutUntilBeat=(Math.floor(Transport.beat/bpb)+1)*bpb;    // resume on the next 小節頭
   cutActive=true;
   flash.kind='cut'; flash.a=0.32;
-  dbg('FLICK ▼ → BREAK');
+  dbg('FLICK ▼ → BREAK'); tutorialNotify('break');
 }
 function firePunch(){
   if(!AC) return;
   const t=AC.currentTime+0.02;          // left TAP — a punchy one-shot: floor-tom + kick + snare + cool flash
   tom(t,0.8,95); kick(t,0.7); snare(t,0.55);
   flash.kind='drop'; flash.a=0.24;
-  dbg('TAP → PUNCH');
+  dbg('TAP → PUNCH'); tutorialNotify('tap');
 }
 /* ================================================================
    VISUALS (phase-1 minimal) — a dark room that breathes with the
@@ -1334,12 +1431,18 @@ window.addEventListener('resize',resize);resize();
 
 let bgTension=0.2, bgTensionTarget=0.2;
 const pulses=[];
-const leadTrail=[];   // the line you are singing — the signature visual
+// the sung line — the signature visual. A new note doesn't erase the old line:
+// the finished stroke is frozen into `oldStrokes` and keeps fading on its own clock,
+// so the thread you just sang lingers naturally instead of snapping away.
+let leadStroke=[];    // the stroke currently being sung (appended to)
+const oldStrokes=[];  // finished strokes, still fading out
 const ripples=[];     // a ring at each note onset / leap
 const parts=[];       // NIGHT LANGUAGE-style particle burst (used by the outside flick)
 const OUT_COL=[180,212,255];   // NIGHT LANGUAGE's blue-white "outside" colour
 
-function pushTrail(x,y){ leadTrail.push({x,y,t:performance.now()}); if(leadTrail.length>120) leadTrail.shift(); }
+function pushTrail(x,y){ leadStroke.push({x,y,t:performance.now()}); if(leadStroke.length>120) leadStroke.shift(); }
+// freeze the active stroke so it fades on its own; don't connect the next note to it
+function breakTrail(){ if(leadStroke.length>1) oldStrokes.push(leadStroke); leadStroke=[]; if(oldStrokes.length>12) oldStrokes.shift(); }
 function ripple(x01,y01,midi,col){
   const p01=clamp((midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo),0,1);
   ripples.push({x:x01*W,y:y01*H,r:6,maxR:lerp(40,150,p01),a:0.8,col:col||null});
@@ -1410,21 +1513,30 @@ function frame(){
   }
   if(parts.length>600)parts.splice(0,parts.length-600);
 
-  // the sung line — a fading thread, thicker & hotter with intensity
-  while(leadTrail.length && now-leadTrail[0].t>1200) leadTrail.shift();
-  if(leadTrail.length>1){
-    cx.lineCap='round'; cx.lineJoin='round';
-    for(let i=1;i<leadTrail.length;i++){
-      const p0=leadTrail[i-1], p1=leadTrail[i];
+  // the sung line — a fading thread, thicker & hotter with intensity. Each stroke
+  // (the active one + any frozen by a new note/flick) ages on its own clock; segments
+  // are only drawn within a stroke, so a fresh note never connects to the old line.
+  cx.lineCap='round'; cx.lineJoin='round';
+  function drawStroke(stroke){
+    for(let i=1;i<stroke.length;i++){
+      const p0=stroke[i-1], p1=stroke[i];
       const age=(now-p1.t)/1100; if(age>=1) continue;
       cx.strokeStyle=`rgba(${lr},${lg},${lb},${(1-age)*0.6})`;
       cx.lineWidth=lerp(1,4,1-age)*lerp(1,1.8,leadIntensity);
       cx.beginPath();cx.moveTo(p0.x,p0.y);cx.lineTo(p1.x,p1.y);cx.stroke();
     }
   }
+  for(let s=oldStrokes.length-1;s>=0;s--){
+    const st=oldStrokes[s];
+    while(st.length && now-st[0].t>1200) st.shift();   // shed faded points
+    if(st.length<2){ oldStrokes.splice(s,1); continue; } // whole stroke gone
+    drawStroke(st);
+  }
+  while(leadStroke.length && now-leadStroke[0].t>1200) leadStroke.shift();
+  if(leadStroke.length>1) drawStroke(leadStroke);
   // fingertip glow while singing
-  if(lead.pid!==null && lead.voice && leadTrail.length){
-    const tip=leadTrail[leadTrail.length-1];
+  if(lead.pid!==null && lead.voice && leadStroke.length){
+    const tip=leadStroke[leadStroke.length-1];
     cx.beginPath();cx.arc(tip.x,tip.y,lerp(6,16,leadIntensity),0,7);
     cx.fillStyle=`rgba(${lr},${lg},${lb},0.85)`;
     cx.shadowColor='rgba(255,179,92,0.9)'; cx.shadowBlur=lerp(10,28,leadIntensity);
@@ -1513,6 +1625,89 @@ cv.addEventListener('pointerdown',routeDown);
 cv.addEventListener('pointermove',routeMove);
 cv.addEventListener('pointerup',routeEnd);
 cv.addEventListener('pointercancel',routeEnd);
+
+/* ---------------- settings overlay ----------------
+   A small gold dot (bottom-right) opens a minimal panel. Its own DOM element sits
+   above the canvas, so tapping it never triggers a lead note. Grows over time;
+   for now it just hosts the debug-HUD toggle. */
+const settingsEl=document.getElementById('settings');
+const togHud=document.getElementById('tog-hud');
+function syncHud(){                                    // reflect CONFIG.debug in the HUD + toggle
+  if(dbgEl) dbgEl.style.display = CONFIG.debug ? 'block' : 'none';
+  togHud.textContent = CONFIG.debug ? 'ON' : 'OFF';
+  togHud.classList.toggle('on', CONFIG.debug);
+}
+function openSettings(){ syncHud(); settingsEl.classList.add('open'); }
+function closeSettings(){ settingsEl.classList.remove('open'); }
+document.getElementById('gear').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();openSettings();});
+document.getElementById('settingsClose').addEventListener('click',e=>{e.stopPropagation();closeSettings();});
+togHud.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=!CONFIG.debug; syncHud(); });
+// tap the dim backdrop (outside the rows) to close
+settingsEl.addEventListener('pointerdown',e=>{ if(e.target===settingsEl) closeSettings(); });
+syncHud();   // initial state
+
+/* ---------------- interactive tutorial ----------------
+   Launched from the settings panel. A top card names a gesture and waits; the band
+   keeps playing underneath so every move is heard and seen. Each gesture's recogniser
+   calls tutorialNotify(kind) — when it matches the current step, the card confirms and
+   advances. Per-session only, no storage. SKIP moves on without doing it; EXIT leaves. */
+const TUTORIAL_STEPS=[
+  {kind:'voice', title:'The voice',        text:'Touch anywhere on the right and slide up and down. Higher up, higher in pitch — and you can never play a wrong note.'},
+  {kind:'temp',  title:'Temperature',      text:'In the bottom-left, drag slowly UP to heat the band, DOWN to cool it. This is your most-used dial.'},
+  {kind:'hold',  title:'Hold the breath',  text:'Press and HOLD in the bottom-left. The band suspends — lift your finger to let it breathe again.'},
+  {kind:'tap',   title:'Punch',            text:'TAP quickly in the bottom-left for a drum accent. Tap a rhythm to drive the band.'},
+  {kind:'kime',  title:'Hit',              text:'FLICK sharply UP in the bottom-left to throw a band hit — a sudden accent.'},
+  {kind:'break', title:'Break',            text:'FLICK sharply DOWN in the bottom-left. The cymbals drop out until the next bar.'},
+  {kind:'swipe', title:'Change the harmony',text:'SWIPE sideways in the bottom-left, slide to a progression, and release. It glides in on the next turnaround.'},
+  {kind:'rflick',title:'Step outside',     text:'FLICK your singing finger sharply in any direction for one note just outside the key. Resolve it yourself.'},
+];
+const tutEl=document.getElementById('tutorial');
+const tutStepEl=document.getElementById('tut-step');
+const tutTtlEl=document.getElementById('tut-ttl');
+const tutTxtEl=document.getElementById('tut-txt');
+const tutDotsEl=document.getElementById('tut-dots');
+let tutActive=false, tutStep=0, tutAdvanceT=null;
+
+function renderTutDots(){
+  tutDotsEl.innerHTML='';
+  TUTORIAL_STEPS.forEach((s,i)=>{
+    const d=document.createElement('i');
+    if(i<tutStep) d.className='on';
+    if(i===tutStep) d.className='cur';
+    tutDotsEl.appendChild(d);
+  });
+}
+function showTutStep(){
+  const s=TUTORIAL_STEPS[tutStep];
+  tutStepEl.textContent='STEP '+(tutStep+1)+' / '+TUTORIAL_STEPS.length;
+  tutTtlEl.textContent=s.title;
+  tutTxtEl.textContent=s.text; tutTxtEl.classList.remove('done');
+  renderTutDots();
+}
+function startTutorial(){
+  if(!AC) start();                 // make sure the band is running so results are audible
+  tutActive=true; tutStep=0; clearTimeout(tutAdvanceT); tutAdvanceT=null;
+  tutEl.classList.add('open'); showTutStep();
+}
+function endTutorial(){
+  tutActive=false; clearTimeout(tutAdvanceT); tutAdvanceT=null;
+  tutEl.classList.remove('open');
+}
+function nextTutStep(){
+  clearTimeout(tutAdvanceT); tutAdvanceT=null;
+  if(tutStep>=TUTORIAL_STEPS.length-1){ endTutorial(); return; }
+  tutStep++; showTutStep();
+}
+// called by every gesture recogniser; cheap no-op unless the tutorial is waiting on it
+function tutorialNotify(kind){
+  if(!tutActive || tutAdvanceT) return;              // ignore while confirming a step
+  if(TUTORIAL_STEPS[tutStep].kind!==kind) return;
+  tutTxtEl.textContent='✓  nice'; tutTxtEl.classList.add('done');
+  tutAdvanceT=setTimeout(nextTutStep,1100);          // let the result land, then advance
+}
+document.getElementById('tut-start').addEventListener('click',e=>{ e.stopPropagation(); closeSettings(); startTutorial(); });
+document.getElementById('tut-skip').addEventListener('click',e=>{ e.stopPropagation(); nextTutStep(); });
+document.getElementById('tut-exit').addEventListener('click',e=>{ e.stopPropagation(); endTutorial(); });
 </script>
 </body>
 </html>
