@@ -159,7 +159,6 @@
     <div class="dots" id="tut-dots"></div>
     <div class="row">
       <button id="tut-skip">SKIP</button>
-      <button id="tut-exit">EXIT</button>
     </div>
   </div>
 </div>
@@ -192,7 +191,7 @@
    CONFIG — every tunable lives here. No magic numbers in logic.
    ================================================================ */
 const CONFIG = {
-  debug: true,            // show the top-right gesture/state HUD (turn off for real play)
+  debug: false,           // show the top-right gesture/state HUD (toggle in Settings)
 
   // ---- Transport ----
   bpm: 128,               // medium-up, Rosenwinkel-leaning
@@ -277,8 +276,6 @@ const CONFIG = {
     selectorBand: 0.6,     // selector spans this CENTRED fraction of the width; the outer margins are dead zones
     TAP_MAX_MS: 200,       // a quick, near-still touch (no flick/hold/drag) → a comp stab
     TAP_MAX_DISP: 20,      // …with at most this much travel
-    breakCut: 'cymbals',   // down-flick BREAK drops this until the next bar downbeat (小節頭):
-                           //   'cymbals' (ride+hat, pulse continues — gentle) | 'drumsbass' (whole groove)
   },
 
   // ---- BandBrain — reaction / interpretation / deviation (decided each bar) ----
@@ -287,7 +284,7 @@ const CONFIG = {
     leadWeight: 0.70,     // how much the soloist's own intensity drives it (reaction)
     restTemp: 0.44,       // temperature drifts home to this when the left hand is idle
                           //    (→ band rests at ~0.35, not stuck loud after a push)
-    tempReturn: 0.005,    // per-frame ease of that drift home
+    tempReturn: 0.0025,   // per-frame ease of that drift home (lower = slower return to rest)
     suddenSpan: 0.22,     // a target jump this big counts as fully "sudden"
     easeSlow: 0.14,       // a gradual change → lazy, teasing response
     easeFast: 0.55,       // a sudden change → the band jumps with you
@@ -387,8 +384,7 @@ let pendingProg=null;   // destination progression chosen by the scrub selector 
 let pivotChord=null;    // transient V7 / tritone-sub / altered chord bridging into the destination
 let selectorActive=false, selectorIndex=0;  // progression scrub selector (shown while scrubbing)
 let gaugeFrom=0, gaugeTo=0;  // transition gauge span in beats (commit → destination arrival)
-let cutActive=false;    // left-hand down-flick — a BREAK: stop SCHEDULING the dropped instruments
-let cutUntilBeat=0;     // …until this beat (next 小節頭). Sounds already ringing decay naturally.
+let fillAtBeat=-1;      // a drum fill is queued for this absolute beat (down-flick / progression change)
 
 /* ================================================================
    AUDIO ENGINE — master bus, compressor, lush reverb, motif delay.
@@ -718,32 +714,26 @@ function bandPlaying(){ return !suspended; }
    low → half-time feel, mid → swing, high → burning (bombs/fills/triplets). */
 function scheduleBeat(t,beatInBar){
   if(suspended) return;                                     // 間 (hold) — full hush
-  // during a BREAK, stop SCHEDULING the dropped instruments — but anything already
-  // ringing keeps decaying naturally (we don't touch live notes)
-  if(cutActive && CONFIG.leftHand.breakCut==='drumsbass') return;   // drop drums & bass
-  const cym = cutActive && CONFIG.leftHand.breakCut==='cymbals';    // drop ride+hat
   const E=BandBrain.effDrive, G=CONFIG.groove;
   const band = E<G.halfTimeBelow ? 'half' : (E>G.burningAbove ? 'burn' : 'swing');
-  if(band==='half') drumsHalfTime(t,beatInBar,cym);
-  else drumsSwing(t,beatInBar,band,cym);
+  if(band==='half') drumsHalfTime(t,beatInBar);
+  else drumsSwing(t,beatInBar,band);
   scheduleBass(t,beatInBar,band);
 }
 
 /* SWING (mid) & BURNING (high) drums. Densities/dynamics open with energy; in the
    burning band the kit also drops "bombs" and throws an occasional fill. */
-function drumsSwing(t,b,band,cym){
+function drumsSwing(t,b,band){
   const BEAT=Transport.beatDur, off=BEAT*CONFIG.swing, j=()=>t+rand(-0.006,0.006);
   const backbeat=(b===1||b===3);
   const P=BandBrain.parts, E=P.drums;
   const more=v=>clamp(v*(0.2+1.8*E),0,1);
   const acc=lerp(0.72,1.18,P.accent);
 
-  if(!cym){                                                 // cymbals not scheduled during a 'cymbals' break
-    if(Math.random()<0.97) ride(j(),(backbeat?0.9:0.66)*acc,P.legato);
-    const skip = backbeat ? CONFIG.rideSkipProb*lerp(0.4,1,E) : lerp(0,0.7,E);
-    if(Math.random()<skip) ride(t+off+rand(-0.006,0.006),0.45*acc,P.legato);
-    if(backbeat) hat(j(),acc);
-  }
+  if(Math.random()<0.97) ride(j(),(backbeat?0.9:0.66)*acc,P.legato);
+  const skip = backbeat ? CONFIG.rideSkipProb*lerp(0.4,1,E) : lerp(0,0.7,E);
+  if(Math.random()<skip) ride(t+off+rand(-0.006,0.006),0.45*acc,P.legato);
+  if(backbeat) hat(j(),acc);
   if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22)*acc);
   if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6)*acc);
   if(b===0&&Math.random()<CONFIG.featherKickProb*lerp(0.7,1.4,E)) kick(j(),0.16);
@@ -757,30 +747,88 @@ function drumsSwing(t,b,band,cym){
     if(Math.random()<G.burnBombProb*r) (Math.random()<0.5?kick:snare)(t+BEAT*2/3+rand(-0.005,0.005),rand(0.5,0.85));
     if(Math.random()<G.burnBombProb*0.7*r) snare(t+BEAT/3,rand(0.4,0.65));
     if(Math.random()<G.burnBombProb*0.5*r) kick(t+BEAT/3,rand(0.3,0.5));
-    if(!cym && Math.random()<G.burnBombProb*0.4*r) ride(t+BEAT/3,0.5,P.legato);   // splashy off-beat accents
-    if(b===CONFIG.beatsPerBar-1 && Math.random()<G.burnFillProb*r) drumFill(t);
+    if(Math.random()<G.burnBombProb*0.4*r) ride(t+BEAT/3,0.5,P.legato);   // splashy off-beat accents
+    if(b===CONFIG.beatsPerBar-1 && Math.random()<G.burnFillProb*r) drumFill(t,bandStrength());
   }
 }
 
 /* HALF-TIME (low) — spacious: soft ride on quarters, the backbeat moved to beat 3
    only, a soft kick on 1. Reads as "twice as slow" though the tempo holds. */
-function drumsHalfTime(t,b,cym){
+function drumsHalfTime(t,b){
   const j=()=>t+rand(-0.006,0.006);
   const acc=lerp(0.55,0.85,BandBrain.parts.accent);
   const back=(b===1||b===3);                                     // beats 2 & 4
-  if(back && !cym){ ride(j(),0.6*acc,0.85); hat(j(),0.55*acc); } // cymbals on 2 & 4 (skipped during a break)
+  if(back){ ride(j(),0.6*acc,0.85); hat(j(),0.55*acc); }         // cymbals on 2 & 4
   if(b===2) snare(j(),0.5*acc);                                  // soft half-time backbeat on 3
   if(b===0 && Math.random()<0.55) kick(j(),0.18);               // soft kick on 1
   if(Math.random()<0.04) snare(t+Transport.beatDur*CONFIG.swing,0.12); // a rare brushed ghost
 }
 
-/* a short fill on the last beat of a burning bar */
-function drumFill(t){
-  const BEAT=Transport.beatDur, n=4, toms=[170,140,110,90];
-  for(let i=0;i<n;i++){
-    const tt=t+(i+1)*(BEAT/(n+1))+rand(-0.005,0.005);
-    if(Math.random()<0.5) snare(tt,rand(0.5,0.78)); else tom(tt,rand(0.55,0.85),toms[i%toms.length]);
-  }
+/* band energy as a 0..1 fill strength — cool bands get a small fill, hot bands a flashy one */
+function bandStrength(){ return clamp(BandBrain.effDrive,0,1); }
+
+/* a library of jazz fill FIGURES — each returns timed events {at (0..1 of the beat), kind, v}.
+   Density/voicing scale with strength `s`, but the SHAPE is chosen at random per fill, so the
+   same band energy never repeats the same lick twice. */
+function fillFigures(s){
+  const n=Math.round(lerp(3,7,s));                       // base density
+  const cres=(i,m)=>lerp(0.8,1.18,m>1?i/(m-1):1);        // crescendo into the downbeat
+  const voice=()=> s<0.4?'snare':(Math.random()<0.5?'snare':'tom');
+  const figs=[];
+
+  // 1) even run — alternating snare/tom across the beat
+  { const ev=[]; for(let i=0;i<n;i++) ev.push({at:i/n,kind:voice(),v:cres(i,n)}); figs.push({events:ev}); }
+
+  // 2) triplet figure — accents every 3rd, ghosts between (six-note when hot)
+  { const m=s>0.6?6:3, ev=[];
+    for(let i=0;i<m;i++){ const acc=(i%3===0); ev.push({at:i/m,kind:acc?voice():'ghost',v:acc?cres(i,m):0.5}); }
+    figs.push({events:ev}); }
+
+  // 3) descending tom cascade — high → low
+  { const m=s>0.5?4:3, ev=[]; for(let i=0;i<m;i++) ev.push({at:i/m,kind:'tom',tom:i%4,v:cres(i,m)}); figs.push({events:ev}); }
+
+  // 4) snare roll — a stream of ghosts resolving to a hard accent
+  { const m=Math.round(lerp(4,9,s)), ev=[];
+    for(let i=0;i<m;i++) ev.push({at:i/m,kind:i===m-1?'snare':'ghost',v:i===m-1?1.15:lerp(0.4,0.7,i/m)});
+    figs.push({events:ev}); }
+
+  // 5) syncopated — accents off the grid with a gap, leaving space
+  { const slots=s>0.5?[0,0.375,0.625,0.875]:[0,0.5,0.875], ev=[];
+    slots.forEach((at,i)=>ev.push({at,kind:i===slots.length-1?'snare':voice(),v:cres(i,slots.length)}));
+    figs.push({events:ev}); }
+
+  // 6) kick-anchored answer — a bomb, then a snare/tom phrase (hot bands only)
+  if(s>0.45){ const m=n-1, ev=[{at:0,kind:'kick',v:1.0}];
+    for(let i=0;i<m;i++) ev.push({at:(i+1)/(m+1),kind:Math.random()<0.5?'snare':'tom',v:cres(i,m)});
+    figs.push({events:ev}); }
+
+  return figs;
+}
+
+/* a jazz drum fill laid across the final beat `t`, resolving onto the next downbeat (t+BEAT).
+   Picks a random figure (scaled by strength), so cool→small & hot→flashy but never one-pattern.
+   Used for the burn auto-fill, the down-flick, and the bar before a progression change. */
+function drumFill(t,strength){
+  const BEAT=Transport.beatDur, s=clamp(strength,0,1);
+  const toms=[180,150,120,95];
+  const span=BEAT*lerp(0.66,1.0,s);                // hotter fills eat more of the beat
+  const start=t+BEAT-span;                          // back-time it so the run ends on the downbeat
+  const base=lerp(0.32,0.8,s);
+  const figs=fillFigures(s), fig=figs[irand(0,figs.length-1)];
+  fig.events.forEach((e,i)=>{
+    const tt=start+clamp(e.at,0,1)*span+rand(-0.005,0.005);
+    const v=base*e.v*rand(0.85,1.12);
+    if(e.kind==='snare')      snare(tt,v);
+    else if(e.kind==='ghost') snare(tt,v*0.45);
+    else if(e.kind==='kick')  kick(tt,v*0.9);
+    else                      tom(tt,v,toms[e.tom!=null?e.tom:(i%toms.length)]);
+    if(s>0.7 && e.kind!=='kick' && Math.random()<0.3) kick(tt,v*0.7);   // bombs underneath when hot
+  });
+  // landing — a cymbal on the downbeat (hot→crash, cool→ride), occasionally left open for variety
+  const land=t+BEAT, r=Math.random();
+  if(s>0.6 && r>0.15)      crash(land,lerp(0.3,0.5,s));
+  else if(r>0.25)          ride(land,0.5,BandBrain.parts.legato);
+  if(s>0.55 && Math.random()<0.85) kick(land,lerp(0.3,0.5,s));   // anchor the landing
 }
 
 /* walking bass — half-time plays roots/fifths long; swing walks; burning mixes in
@@ -926,11 +974,13 @@ const Transport = {
       const beatInBar=b%CONFIG.beatsPerBar;
       const bar=Math.floor(b/CONFIG.beatsPerBar);
 
-      // a break ends on the next bar downbeat (小節頭) — resume scheduling the instruments
-      if(cutActive && b>=cutUntilBeat){ cutActive=false; cutUntilBeat=0; }
-
       if(beatInBar===0) this.onBar(t,bar);
       this.onBeat(t,beatInBar,bar);
+      // a queued fill fires once the scheduler reaches its beat (down-flick / progression change)
+      if(fillAtBeat>=0 && b>=fillAtBeat){
+        if(!suspended) drumFill(t,bandStrength());
+        fillAtBeat=-1;
+      }
       scheduleVisualPulse(t,beatInBar);
 
       this.nextBeatTime+=this.beatDur;
@@ -949,6 +999,7 @@ const Transport = {
         const destRoot=PROGRESSIONS[pendingProg].chords[0].tones[0];
         pivotChord=chooseDominant(destRoot);               // dominant most akin to the current key
         applyChord(pivotChord,t);
+        // (the announcing fill was already queued at commit time — see commitProgression)
       }else if(pendingProg!==null && pivotChord){
         // step 2: resolve into the destination progression
         progIdx=pendingProg; CHORDS=PROGRESSIONS[progIdx].chords;
@@ -1184,7 +1235,7 @@ function nearestTone(m){              // nearest chord tone either side of m
 /* visuals shared by both flick figures: short (no) trail, one cyan ring per outside
    note + the landing ring in the lead colour, and a blue-white particle burst */
 function flickVisuals(notes,landing){
-  breakTrail(); ripples.length=0;
+  clearTrail(); ripples.length=0;
   const x01=clamp(lead.x/W,0,1);
   notes.forEach(m=>{
     const col = m===landing ? null : OUT_COL;
@@ -1216,8 +1267,8 @@ function flickSingle(dir){
   v.env.gain.exponentialRampToValueAtTime(0.24,t+0.016);     // sharp attack, then it just sustains
   v.midi=out; lastLeadMidi=out;
   leadIntensity=Math.max(leadIntensity,RF.intensityKick);
-  // the single note IS the outside note → cyan ring + particle burst, no new trail
-  breakTrail(); ripples.length=0;
+  // the single note IS the outside note → cyan ring + particle burst, no trail
+  clearTrail(); ripples.length=0;
   ripple(clamp(lead.x/W,0,1),clamp((CONFIG.leadHi-out)/(CONFIG.leadHi-CONFIG.leadLo),0,1),out,OUT_COL);
   burstParticles(lead.x,lead.y,OUT_COL,26);
   dbg('R-SINGLE '+(dir>0?'▲':'▼')+' '+midiName(out));
@@ -1360,7 +1411,7 @@ function leftUp(e){
                  && disp>=C.FLICK_MIN_DISP && disp<=C.FLICK_MAX_DISP;
     if(isFlick){
       temperature=left.tempStart;                          // a flick never changes temperature
-      if(left.sumY<0) fireHit(); else fireBreak();         // up-ish = hit, down-ish = break (any direction)
+      if(left.sumY<0) fireHit(); else fireFill();          // up-ish = hit, down-ish = fill (any direction)
     }else if(contact<=C.TAP_MAX_MS && left.maxDisp<C.TAP_MAX_DISP){
       temperature=left.tempStart;                          // a tap isn't a temperature change
       firePunch();                                         // a quick, repeatable tom/kick punch
@@ -1382,6 +1433,7 @@ function commitProgression(i){
   const span=CONFIG.chordChangeEveryBars*CONFIG.beatsPerBar, P=beatPos();
   const pivotBeat=Math.ceil((P+0.001)/span)*span;          // next boundary = pivot starts
   gaugeFrom=P; gaugeTo=pivotBeat+span;                      // …dominant ends one slot later = destination
+  fillAtBeat=Math.round(gaugeTo)-1;                        // announce the change NOW: fill the beat before it lands
   dbg('PROG → '+PROGRESSIONS[i].name);
 }
 function beatPos(){                                         // continuous beat position (for the transition gauge)
@@ -1395,16 +1447,17 @@ function fireHit(){
   flash.kind='hit'; flash.a=0.30;
   dbg('FLICK ▲ → HIT'); tutorialNotify('kime');
 }
-function fireBreak(){
-  // left DOWN-flick — a BREAK: stop scheduling the dropped instruments (cymbals, or the
-  // whole groove) until the next bar downbeat (小節頭). Notes already ringing at the moment
-  // of the flick are left to decay naturally; only NEW hits are withheld.
-  if(!AC || cutActive) return;
+function fireFill(){
+  // left DOWN-flick — queue a drum fill onto the last beat of the CURRENT bar (its character
+  // scales with band energy). If that beat is already scheduled (we're late in the bar), the
+  // fill slides to the end of the next bar so it never lands behind the beat.
+  if(!AC) return;
   const bpb=CONFIG.beatsPerBar;
-  cutUntilBeat=(Math.floor(Transport.beat/bpb)+1)*bpb;    // resume on the next 小節頭
-  cutActive=true;
-  flash.kind='cut'; flash.a=0.32;
-  dbg('FLICK ▼ → BREAK'); tutorialNotify('break');
+  let last=Math.floor(Transport.beat/bpb)*bpb+(bpb-1);
+  while(last<Transport.beat) last+=bpb;                    // ensure the scheduler hasn't passed it
+  fillAtBeat=last;
+  flash.kind='fill'; flash.a=lerp(0.14,0.28,bandStrength());
+  dbg('FLICK ▼ → FILL'); tutorialNotify('fill');
 }
 function firePunch(){
   if(!AC) return;
@@ -1443,6 +1496,8 @@ const OUT_COL=[180,212,255];   // NIGHT LANGUAGE's blue-white "outside" colour
 function pushTrail(x,y){ leadStroke.push({x,y,t:performance.now()}); if(leadStroke.length>120) leadStroke.shift(); }
 // freeze the active stroke so it fades on its own; don't connect the next note to it
 function breakTrail(){ if(leadStroke.length>1) oldStrokes.push(leadStroke); leadStroke=[]; if(oldStrokes.length>12) oldStrokes.shift(); }
+// discard the active stroke outright — a flick draws a particle burst, never a line
+function clearTrail(){ leadStroke=[]; }
 function ripple(x01,y01,midi,col){
   const p01=clamp((midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo),0,1);
   ripples.push({x:x01*W,y:y01*H,r:6,maxR:lerp(40,150,p01),a:0.8,col:col||null});
@@ -1451,6 +1506,42 @@ function burstParticles(x,y,col,n){
   for(let i=0;i<n;i++){
     const ang=rand(0,Math.PI*2), sp=rand(0.6,3.2);
     parts.push({x,y,vx:Math.cos(ang)*sp,vy:Math.sin(ang)*sp,life:1,decay:rand(0.012,0.028),r:rand(1,3),col});
+  }
+}
+
+/* a ghost hint: a faint travel-axis line (a→b) with a glowing fingertip riding along it,
+   used by the tutorial to show WHERE and HOW a left-hand gesture moves (the zone is narrow). */
+function drawGhostPath(ax,ay,bx,by,dx,dy,col,alpha){
+  if(alpha<=0.01) return;
+  const grd=cx.createLinearGradient(ax,ay,bx,by);
+  grd.addColorStop(0,`rgba(${col},0)`);
+  grd.addColorStop(0.5,`rgba(${col},${alpha*0.5})`);
+  grd.addColorStop(1,`rgba(${col},0)`);
+  cx.strokeStyle=grd; cx.lineWidth=2; cx.lineCap='round';
+  cx.beginPath(); cx.moveTo(ax,ay); cx.lineTo(bx,by); cx.stroke();
+  cx.beginPath(); cx.arc(dx,dy,5,0,7);
+  cx.fillStyle=`rgba(${col},${alpha})`;
+  cx.shadowColor=`rgba(${col},${alpha})`; cx.shadowBlur=10;
+  cx.fill(); cx.shadowBlur=0;
+  cx.beginPath(); cx.arc(dx,dy,9,0,7);
+  cx.strokeStyle=`rgba(${col},${alpha*0.35})`; cx.lineWidth=1.2; cx.stroke();
+}
+let tutGhostA=0, tutGhostKind=null;   // eased alpha + the kind we're CURRENTLY showing
+function drawTutorialGhost(now){
+  const kind = tutActive ? TUTORIAL_STEPS[tutStep].kind : null;
+  const show = (kind==='temp' || kind==='swipe');   // only the two directional left-hand gestures
+  if(show) tutGhostKind=kind;                        // remember it so the fade-OUT keeps the same shape
+  tutGhostA += ((show?0.45:0)-tutGhostA)*0.08;
+  if(tutGhostA<=0.01){ tutGhostKind=null; return; }
+  const GOLD='232,213,163';                          // both ghosts share the scrub colour
+  const tri=Math.sin((now%2200)/2200*Math.PI*2);    // -1..1 smooth back-and-forth
+  const zx=W*C.zoneW;                                 // right edge of the left-hand zone
+  if(tutGhostKind==='temp'){                          // vertical swipe = temperature
+    const gx=zx*0.5, midY=H*0.74, amp=H*0.13;
+    drawGhostPath(gx,midY-amp,gx,midY+amp, gx,midY+tri*amp, GOLD, tutGhostA);
+  }else{                                              // horizontal swipe = scrub, starts in the zone
+    const gy=H*0.74, x0=zx*0.5, x1=W*0.5, gx=lerp(x0,x1,(tri+1)/2);
+    drawGhostPath(x0,gy,x1,gy, gx,gy, GOLD, tutGhostA);
   }
 }
 
@@ -1481,13 +1572,14 @@ function frame(){
     cx.fillStyle=eg;cx.fillRect(0,0,W,H);
   }
 
-  // soft concentric blooms from the centre on each beat
+  // soft concentric blooms on each beat — emanating from low (a quarter up from the bottom)
+  const bloomY=H*0.75;
   for(let i=pulses.length-1;i>=0;i--){
     const p=pulses[i];
     p.r+=(p.max-p.r)*0.05; p.a*=0.94;
     if(p.a<0.01){pulses.splice(i,1);continue;}
     const col=lerp(255,180,bgTension)|0, blu=lerp(120,255,bgTension)|0;
-    cx.beginPath();cx.arc(W/2,H*0.62,p.r,0,7);
+    cx.beginPath();cx.arc(W/2,bloomY,p.r,0,7);
     cx.strokeStyle=`rgba(${col},${lerp(200,212,bgTension)|0},${blu},${p.a})`;
     cx.lineWidth=1.4;cx.stroke();
   }
@@ -1543,6 +1635,9 @@ function frame(){
     cx.fill(); cx.shadowBlur=0;
   }
 
+  // tutorial ghost — demonstrate the narrow-zone left-hand swipes (temp / scrub)
+  drawTutorialGhost(now);
+
   // 間 (hold) — the room sinks into darkness while the band holds its breath
   suspendViz += ((suspended?1:0)-suspendViz)*0.08;
   if(suspendViz>0.01){ cx.fillStyle=`rgba(2,3,9,${suspendViz*0.55})`; cx.fillRect(0,0,W,H); }
@@ -1564,11 +1659,11 @@ function frame(){
     cx.fillStyle='rgba(232,213,163,0.55)'; cx.fillRect(0,H-4,W*g,4);
   }
 
-  // discrete event flash — a warm lift for a HIT, a cool lift for a DROP
+  // discrete event flash — warm for a HIT, amber for a FILL, pale cyan for a PUNCH
   if(flash.a>0.01){
     flash.a*=0.9;
     cx.fillStyle = flash.kind==='hit'  ? `rgba(255,232,184,${flash.a})`   // warm lift (HIT)
-                 : flash.kind==='cut'  ? `rgba(2,3,10,${flash.a*0.9})`    // dark sink (BREAK)
+                 : flash.kind==='fill' ? `rgba(255,206,150,${flash.a})`   // amber lift (FILL)
                  : `rgba(150,210,235,${flash.a})`;                        // pale cyan (tap PUNCH)
     cx.fillRect(0,0,W,H);
   }
@@ -1576,13 +1671,15 @@ function frame(){
   // debug HUD — last gesture + the resulting state it changed
   if(CONFIG.debug && dbgEl){
     const leadNote = lastLeadMidi!==null ? midiName(lastLeadMidi) : '—';
+    const fillRem = fillAtBeat>=0 ? Math.max(0,fillAtBeat-Math.floor(beatPos())) : -1;
     dbgEl.textContent =
       '▸ '+dbgAction+'\n'+
       'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+'\n'+
       'prog '+PROGRESSIONS[progIdx].name+'\n'+
       'chord '+chord.name+'\n'+
       'lead '+leadNote+'  i'+leadIntensity.toFixed(2)+'\n'+
-      'band '+BandBrain.effDrive.toFixed(2)+'→'+BandBrain.target.toFixed(2)+(BandBrain.dev?('  ✦'+BandBrain.dev.type):'');
+      'band '+BandBrain.effDrive.toFixed(2)+'→'+BandBrain.target.toFixed(2)+(BandBrain.dev?('  ✦'+BandBrain.dev.type):'')+'\n'+
+      'fill '+(fillRem>=0?('⏳ '+fillRem+'b → s'+bandStrength().toFixed(2)):'—');
   }
   requestAnimationFrame(frame);
 }
@@ -1652,14 +1749,14 @@ syncHud();   // initial state
    calls tutorialNotify(kind) — when it matches the current step, the card confirms and
    advances. Per-session only, no storage. SKIP moves on without doing it; EXIT leaves. */
 const TUTORIAL_STEPS=[
-  {kind:'voice', title:'The voice',        text:'Touch anywhere on the right and slide up and down. Higher up, higher in pitch — and you can never play a wrong note.'},
-  {kind:'temp',  title:'Temperature',      text:'In the bottom-left, drag slowly UP to heat the band, DOWN to cool it. This is your most-used dial.'},
-  {kind:'hold',  title:'Hold the breath',  text:'Press and HOLD in the bottom-left. The band suspends — lift your finger to let it breathe again.'},
-  {kind:'tap',   title:'Punch',            text:'TAP quickly in the bottom-left for a drum accent. Tap a rhythm to drive the band.'},
-  {kind:'kime',  title:'Hit',              text:'FLICK sharply UP in the bottom-left to throw a band hit — a sudden accent.'},
-  {kind:'break', title:'Break',            text:'FLICK sharply DOWN in the bottom-left. The cymbals drop out until the next bar.'},
-  {kind:'swipe', title:'Change the harmony',text:'SWIPE sideways in the bottom-left, slide to a progression, and release. It glides in on the next turnaround.'},
-  {kind:'rflick',title:'Step outside',     text:'FLICK your singing finger sharply in any direction for one note just outside the key. Resolve it yourself.'},
+  {kind:'voice', title:'The voice',         text:'Touch on the right, slide up and down. Higher is higher — you can’t play a wrong note.'},
+  {kind:'rflick',title:'Step outside',      text:'Flick your singing finger sharply, any direction, for one note just outside the key.'},
+  {kind:'temp',  title:'Temperature',       text:'Bottom-left: drag slowly UP to heat the band, DOWN to cool it. Your main dial.'},
+  {kind:'hold',  title:'Hold the breath',   text:'Press and HOLD bottom-left to suspend the band. Lift to let it breathe again.'},
+  {kind:'tap',   title:'Punch',             text:'TAP quickly bottom-left for a drum accent. Tap a rhythm to drive it.'},
+  {kind:'kime',  title:'Hit',               text:'FLICK sharply UP in the bottom-left to throw a sudden band hit.'},
+  {kind:'fill',  title:'Fill',              text:'FLICK sharply DOWN in the bottom-left to drop a drum fill into the end of the bar.'},
+  {kind:'swipe', title:'Change the harmony',text:'SWIPE sideways bottom-left to pick a progression. It slides in next.'},
 ];
 const tutEl=document.getElementById('tutorial');
 const tutStepEl=document.getElementById('tut-step');
@@ -1707,7 +1804,6 @@ function tutorialNotify(kind){
 }
 document.getElementById('tut-start').addEventListener('click',e=>{ e.stopPropagation(); closeSettings(); startTutorial(); });
 document.getElementById('tut-skip').addEventListener('click',e=>{ e.stopPropagation(); nextTutStep(); });
-document.getElementById('tut-exit').addEventListener('click',e=>{ e.stopPropagation(); endTutorial(); });
 </script>
 </body>
 </html>
