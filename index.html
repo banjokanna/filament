@@ -59,12 +59,22 @@
     font-size:11px;letter-spacing:.18em;color:rgba(232,213,163,.85);
     padding:9px 2px;border-bottom:1px solid rgba(232,213,163,.12);
   }
+  /* all right-side controls share one width so they line up (matches the EN|JP segment) */
+  .srow .tog,.srow .seg{box-sizing:border-box;width:104px;}
   .srow .tog{
     font-size:10px;letter-spacing:.22em;color:rgba(232,213,163,.5);
     border:1px solid rgba(232,213,163,.3);border-radius:2px;padding:4px 11px;
-    cursor:pointer;transition:all .25s;min-width:48px;text-align:center;
+    cursor:pointer;transition:all .25s;text-align:center;
   }
   .srow .tog.on{color:var(--ink);background:var(--gold);border-color:var(--gold);box-shadow:0 0 12px rgba(255,179,92,.5);}
+  /* segmented control (EN | JP) — two options side by side, the active one filled */
+  .srow .seg{display:flex;border:1px solid rgba(232,213,163,.3);border-radius:2px;overflow:hidden;}
+  .srow .seg .opt{
+    flex:1;font-size:10px;letter-spacing:.18em;color:rgba(232,213,163,.5);
+    padding:4px 0;cursor:pointer;transition:all .2s;text-align:center;
+  }
+  .srow .seg .opt+.opt{border-left:1px solid rgba(232,213,163,.3);}
+  .srow .seg .opt.on{color:var(--ink);background:var(--gold);}
   /* close = thin X sitting where the gold dot is (same 40px hit box, corner-aligned) */
   #settingsClose{
     position:fixed;right:6px;bottom:calc(6px + env(safe-area-inset-bottom));z-index:10;
@@ -86,14 +96,14 @@
   #tutorial.open{display:flex;}
   #tutorial .card{
     pointer-events:auto;                      /* …except the card itself */
-    width:min(86vw,420px);
+    width:min(92vw,440px);                    /* wide enough that a JP sentence fits one line */
     background:rgba(8,9,20,.82);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
     border:1px solid rgba(232,213,163,.16);border-radius:7px;
-    padding:15px 20px 14px;color:var(--gold);box-shadow:0 10px 44px rgba(0,0,0,.5);
+    padding:15px 16px 14px;color:var(--gold);box-shadow:0 10px 44px rgba(0,0,0,.5);
   }
   #tutorial .step{font-size:8.5px;letter-spacing:.32em;text-transform:uppercase;color:rgba(232,213,163,.48);margin-bottom:7px;}
   #tutorial .ttl{font-size:15px;letter-spacing:.08em;color:rgba(232,213,163,.96);margin-bottom:7px;}
-  #tutorial .txt{font-size:12px;line-height:1.65;letter-spacing:.03em;color:rgba(232,213,163,.74);min-height:2.6em;}
+  #tutorial .txt{font-size:12px;line-height:1.65;letter-spacing:.03em;color:rgba(232,213,163,.74);min-height:2.6em;white-space:pre-line;}
   #tutorial .txt.done{color:#a6e3b8;letter-spacing:.1em;}
   #tutorial .dots{display:flex;gap:5px;justify-content:center;margin-top:13px;}
   #tutorial .dots i{width:5px;height:5px;border-radius:50%;background:rgba(232,213,163,.2);transition:all .3s;}
@@ -147,6 +157,7 @@
 <div id="gear" title="Settings"></div>
 <div id="settings">
   <div class="srow"><span>HUD</span><span class="tog" id="tog-hud">OFF</span></div>
+  <div class="srow"><span>Language</span><span class="seg"><span class="opt on" id="lang-en">EN</span><span class="opt" id="lang-jp">JP</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="tog" id="tut-start">START</span></div>
   <div id="settingsClose" title="Close">✕</div>
 </div>
@@ -384,6 +395,7 @@ let pendingProg=null;   // destination progression chosen by the scrub selector 
 let pivotChord=null;    // transient V7 / tritone-sub / altered chord bridging into the destination
 let selectorActive=false, selectorIndex=0;  // progression scrub selector (shown while scrubbing)
 let gaugeFrom=0, gaugeTo=0;  // transition gauge span in beats (commit → destination arrival)
+let gaugeWallStart=0, gaugeWallEnd=0;  // …same span in wall-clock ms, so the bar fills perfectly smoothly
 let fillAtBeat=-1;      // a drum fill is queued for this absolute beat (down-flick / progression change)
 
 /* ================================================================
@@ -1433,6 +1445,8 @@ function commitProgression(i){
   const span=CONFIG.chordChangeEveryBars*CONFIG.beatsPerBar, P=beatPos();
   const pivotBeat=Math.ceil((P+0.001)/span)*span;          // next boundary = pivot starts
   gaugeFrom=P; gaugeTo=pivotBeat+span;                      // …dominant ends one slot later = destination
+  gaugeWallStart=performance.now();                        // drive the bar off wall-clock (smooth, no beat-step)
+  gaugeWallEnd=gaugeWallStart+(gaugeTo-P)*Transport.beatDur*1000;
   fillAtBeat=Math.round(gaugeTo)-1;                        // announce the change NOW: fill the beat before it lands
   dbg('PROG → '+PROGRESSIONS[i].name);
 }
@@ -1509,40 +1523,74 @@ function burstParticles(x,y,col,n){
   }
 }
 
-/* a ghost hint: a faint travel-axis line (a→b) with a glowing fingertip riding along it,
-   used by the tutorial to show WHERE and HOW a left-hand gesture moves (the zone is narrow). */
-function drawGhostPath(ax,ay,bx,by,dx,dy,col,alpha){
-  if(alpha<=0.01) return;
+/* ---- tutorial ghost primitives (all share the gold scrub colour) ---- */
+const GHOST_COL='232,213,163';
+function ghostDot(x,y,alpha,r){            // a small glowing fingertip with a faint ring
+  r=r||5;
+  cx.beginPath(); cx.arc(x,y,r,0,7);
+  cx.fillStyle=`rgba(${GHOST_COL},${alpha})`;
+  cx.shadowColor=`rgba(${GHOST_COL},${alpha})`; cx.shadowBlur=10;
+  cx.fill(); cx.shadowBlur=0;
+  cx.beginPath(); cx.arc(x,y,r*1.8,0,7);
+  cx.strokeStyle=`rgba(${GHOST_COL},${alpha*0.35})`; cx.lineWidth=1.2; cx.stroke();
+}
+function ghostSwipe(ax,ay,bx,by,dx,dy,alpha){   // a travel-axis line with the dot riding along it
   const grd=cx.createLinearGradient(ax,ay,bx,by);
-  grd.addColorStop(0,`rgba(${col},0)`);
-  grd.addColorStop(0.5,`rgba(${col},${alpha*0.5})`);
-  grd.addColorStop(1,`rgba(${col},0)`);
+  grd.addColorStop(0,`rgba(${GHOST_COL},0)`);
+  grd.addColorStop(0.5,`rgba(${GHOST_COL},${alpha*0.5})`);
+  grd.addColorStop(1,`rgba(${GHOST_COL},0)`);
   cx.strokeStyle=grd; cx.lineWidth=2; cx.lineCap='round';
   cx.beginPath(); cx.moveTo(ax,ay); cx.lineTo(bx,by); cx.stroke();
-  cx.beginPath(); cx.arc(dx,dy,5,0,7);
-  cx.fillStyle=`rgba(${col},${alpha})`;
-  cx.shadowColor=`rgba(${col},${alpha})`; cx.shadowBlur=10;
-  cx.fill(); cx.shadowBlur=0;
-  cx.beginPath(); cx.arc(dx,dy,9,0,7);
-  cx.strokeStyle=`rgba(${col},${alpha*0.35})`; cx.lineWidth=1.2; cx.stroke();
+  ghostDot(dx,dy,alpha);
 }
+function ghostFlick(bx,by,vx,vy,alpha,now){     // a SHARP dart: shoots out fast, holds+fades, gaps — reads as "flick quick"
+  const cyc=1250, p=(now%cyc)/cyc;
+  let prog,vis;
+  if(p<0.16){ const k=p/0.16; prog=1-Math.pow(1-k,3); vis=1; }   // fast ease-out shoot
+  else if(p<0.42){ prog=1; vis=1-(p-0.16)/0.26; }                 // at the tip, fading
+  else return;                                                    // gap before the next flick
+  const cxp=bx+vx*prog, cyp=by+vy*prog;
+  const grd=cx.createLinearGradient(bx,by,cxp,cyp);              // a motion streak that conveys speed
+  grd.addColorStop(0,`rgba(${GHOST_COL},0)`);
+  grd.addColorStop(1,`rgba(${GHOST_COL},${alpha*vis*0.85})`);
+  cx.strokeStyle=grd; cx.lineWidth=3; cx.lineCap='round';
+  cx.beginPath(); cx.moveTo(bx,by); cx.lineTo(cxp,cyp); cx.stroke();
+  ghostDot(cxp,cyp,alpha*vis);
+}
+function ghostTap(x,y,alpha,now){               // quick pulses with an expanding ring — "tap, repeatable"
+  const cyc=820, p=(now%cyc)/cyc;
+  if(p>=0.45) return;                            // gap → reads as separate taps
+  const k=p/0.45, a=alpha*(1-k);
+  ghostDot(x,y,a);
+  cx.beginPath(); cx.arc(x,y,5+k*16,0,7);
+  cx.strokeStyle=`rgba(${GHOST_COL},${a*0.5})`; cx.lineWidth=1.5; cx.stroke();
+}
+function ghostHold(x,y,alpha,now){              // a press that SUSTAINS (ring holds, doesn't fly off) — "press & hold"
+  const cyc=2600, p=(now%cyc)/cyc;
+  const press = p<0.18 ? p/0.18 : (p<0.82 ? 1 : 1-(p-0.82)/0.18);
+  ghostDot(x,y,alpha*lerp(0.5,1,press));
+  cx.beginPath(); cx.arc(x,y,10+press*4,0,7);
+  cx.strokeStyle=`rgba(${GHOST_COL},${alpha*press*0.5})`; cx.lineWidth=1.5; cx.stroke();
+}
+
 let tutGhostA=0, tutGhostKind=null;   // eased alpha + the kind we're CURRENTLY showing
+const GHOST_KINDS=['temp','swipe','rflick','kime','fill','tap','hold'];
 function drawTutorialGhost(now){
   const kind = tutActive ? TUTORIAL_STEPS[tutStep].kind : null;
-  const show = (kind==='temp' || kind==='swipe');   // only the two directional left-hand gestures
+  const show = GHOST_KINDS.includes(kind);
   if(show) tutGhostKind=kind;                        // remember it so the fade-OUT keeps the same shape
   tutGhostA += ((show?0.45:0)-tutGhostA)*0.08;
   if(tutGhostA<=0.01){ tutGhostKind=null; return; }
-  const GOLD='232,213,163';                          // both ghosts share the scrub colour
-  const tri=Math.sin((now%2200)/2200*Math.PI*2);    // -1..1 smooth back-and-forth
-  const zx=W*C.zoneW;                                 // right edge of the left-hand zone
-  if(tutGhostKind==='temp'){                          // vertical swipe = temperature
-    const gx=zx*0.5, midY=H*0.74, amp=H*0.13;
-    drawGhostPath(gx,midY-amp,gx,midY+amp, gx,midY+tri*amp, GOLD, tutGhostA);
-  }else{                                              // horizontal swipe = scrub, starts in the zone
-    const gy=H*0.74, x0=zx*0.5, x1=W*0.5, gx=lerp(x0,x1,(tri+1)/2);
-    drawGhostPath(x0,gy,x1,gy, gx,gy, GOLD, tutGhostA);
-  }
+  const A=tutGhostA, k=tutGhostKind;
+  const lx=W*C.zoneW*0.5, ly=H*0.74;                 // centre of the narrow left-hand zone
+  const tri=Math.sin((now%2200)/2200*Math.PI*2);    // smooth back-and-forth for swipes
+  if(k==='temp')        ghostSwipe(lx,ly-H*0.13,lx,ly+H*0.13, lx,ly+tri*H*0.13, A);          // vertical
+  else if(k==='swipe'){ const x1=W*0.5, gx=lerp(lx,x1,(tri+1)/2); ghostSwipe(lx,ly,x1,ly, gx,ly, A); } // horizontal
+  else if(k==='kime')   ghostFlick(lx,H*0.82, 0,-H*0.15, A, now);    // sharp up-flick
+  else if(k==='fill')   ghostFlick(lx,H*0.66, 0, H*0.15, A, now);    // sharp down-flick
+  else if(k==='tap')    ghostTap(lx,ly, A, now);
+  else if(k==='hold')   ghostHold(lx,ly, A, now);
+  else if(k==='rflick') ghostFlick(W*0.7,H*0.58, 0,-H*0.16, A, now); // right-hand flick (the voice side)
 }
 
 /* schedule a visual bloom to fire at the same audio time as the beat */
@@ -1653,9 +1701,10 @@ function frame(){
   }
 
   // transition gauge — ONE fill from the commit until the dominant ends (the moment the
-  // destination progression arrives). Reaching the right edge = the switch.
-  if((pendingProg!==null || pivotChord) && gaugeTo>gaugeFrom){
-    const g=clamp((beatPos()-gaugeFrom)/(gaugeTo-gaugeFrom),0,1);
+  // destination progression arrives). Driven by wall-clock (now) so it fills perfectly smoothly,
+  // instead of stepping with the beat scheduler.
+  if((pendingProg!==null || pivotChord) && gaugeWallEnd>gaugeWallStart){
+    const g=clamp((now-gaugeWallStart)/(gaugeWallEnd-gaugeWallStart),0,1);
     cx.fillStyle='rgba(232,213,163,0.55)'; cx.fillRect(0,H-4,W*g,4);
   }
 
@@ -1741,23 +1790,34 @@ document.getElementById('settingsClose').addEventListener('click',e=>{e.stopProp
 togHud.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=!CONFIG.debug; syncHud(); });
 // tap the dim backdrop (outside the rows) to close
 settingsEl.addEventListener('pointerdown',e=>{ if(e.target===settingsEl) closeSettings(); });
-syncHud();   // initial state
+syncHud();   // initial state (language toggle is wired after the tutorial block, below)
 
 /* ---------------- interactive tutorial ----------------
    Launched from the settings panel. A top card names a gesture and waits; the band
    keeps playing underneath so every move is heard and seen. Each gesture's recogniser
    calls tutorialNotify(kind) — when it matches the current step, the card confirms and
    advances. Per-session only, no storage. SKIP moves on without doing it; EXIT leaves. */
+/* Each step carries EN + JP title/text. The language toggle (Settings) localizes ONLY these
+   two fields per step — all other in-app text stays English. */
 const TUTORIAL_STEPS=[
-  {kind:'voice', title:'The voice',         text:'Touch on the right, slide up and down. Higher is higher — you can’t play a wrong note.'},
-  {kind:'rflick',title:'Step outside',      text:'Flick your singing finger sharply, any direction, for one note just outside the key.'},
-  {kind:'temp',  title:'Temperature',       text:'Bottom-left: drag slowly UP to heat the band, DOWN to cool it. Your main dial.'},
-  {kind:'hold',  title:'Hold the breath',   text:'Press and HOLD bottom-left to suspend the band. Lift to let it breathe again.'},
-  {kind:'tap',   title:'Punch',             text:'TAP quickly bottom-left for a drum accent. Tap a rhythm to drive it.'},
-  {kind:'kime',  title:'Hit',               text:'FLICK sharply UP in the bottom-left to throw a sudden band hit.'},
-  {kind:'fill',  title:'Fill',              text:'FLICK sharply DOWN in the bottom-left to drop a drum fill into the end of the bar.'},
-  {kind:'swipe', title:'Change the harmony',text:'SWIPE sideways bottom-left to pick a progression. It slides in next.'},
+  {kind:'voice', title:'Voice',             text:'Touch the screen and move your finger.\nUp/down is pitch, left/right is expression.',
+                 titleJP:'ボイス',          textJP:'画面をタッチして指を動かす。\n上下が音程、左右が表情。'},
+  {kind:'rflick',title:'Out',               text:'Flick sharply in any direction.\nOne note just outside the key sounds.',
+                 titleJP:'アウト',          textJP:'任意の向きに鋭くフリック。\nキー外の音が一つ鳴ります。'},
+  {kind:'temp',  title:'Temperature',       text:'Drag up in the bottom-left to heat the band, down to cool.\nIt drifts back a while after you release.',
+                 titleJP:'温度',            textJP:'画面左下を上にドラッグでバンドを加熱、下で冷却。\n離してしばらくすると元に戻ります。'},
+  {kind:'hold',  title:'Breath',            text:'Hold in the bottom-left and the band holds its breath.\nIt returns the moment you release.',
+                 titleJP:'ブレス',          textJP:'画面左下をホールドする間、バンドが息を潜める。\n離すとすぐに戻ります。'},
+  {kind:'tap',   title:'Shot',              text:'Tap lightly in the bottom-left for a snare accent.',
+                 titleJP:'ショット',        textJP:'画面左下を軽くタップで、スネアのアクセント。'},
+  {kind:'kime',  title:'Crash',             text:'Flick sharply up in the bottom-left for a crash.',
+                 titleJP:'クラッシュ',      textJP:'画面左下を鋭く上にフリックで、クラッシュを一発。'},
+  {kind:'fill',  title:'Fill',              text:'Flick sharply down in the bottom-left for a drum fill.',
+                 titleJP:'フィル',          textJP:'画面左下を鋭く下にフリックで、小節末にドラムフィル。'},
+  {kind:'swipe', title:'Change the harmony',text:'Swipe right in the bottom-left to pick a progression.\nIt slides into the next one.',
+                 titleJP:'進行を変える',     textJP:'画面左下から右にスワイプ、指を離して進行を選択。\n次の進行にスムーズに移行します。'},
 ];
+let lang='EN';   // 'EN' | 'JP' — localizes only tutorial titles/texts (in memory; not persisted)
 const tutEl=document.getElementById('tutorial');
 const tutStepEl=document.getElementById('tut-step');
 const tutTtlEl=document.getElementById('tut-ttl');
@@ -1776,9 +1836,9 @@ function renderTutDots(){
 }
 function showTutStep(){
   const s=TUTORIAL_STEPS[tutStep];
-  tutStepEl.textContent='STEP '+(tutStep+1)+' / '+TUTORIAL_STEPS.length;
-  tutTtlEl.textContent=s.title;
-  tutTxtEl.textContent=s.text; tutTxtEl.classList.remove('done');
+  tutStepEl.textContent='STEP '+(tutStep+1)+' / '+TUTORIAL_STEPS.length;   // label stays English
+  tutTtlEl.textContent = lang==='JP' ? s.titleJP : s.title;
+  tutTxtEl.textContent = lang==='JP' ? s.textJP  : s.text; tutTxtEl.classList.remove('done');
   renderTutDots();
 }
 function startTutorial(){
@@ -1799,11 +1859,24 @@ function nextTutStep(){
 function tutorialNotify(kind){
   if(!tutActive || tutAdvanceT) return;              // ignore while confirming a step
   if(TUTORIAL_STEPS[tutStep].kind!==kind) return;
-  tutTxtEl.textContent='✓  nice'; tutTxtEl.classList.add('done');
+  tutTxtEl.textContent='✓  nice'; tutTxtEl.classList.add('done');   // confirmation stays English in both langs
   tutAdvanceT=setTimeout(nextTutStep,1100);          // let the result land, then advance
 }
 document.getElementById('tut-start').addEventListener('click',e=>{ e.stopPropagation(); closeSettings(); startTutorial(); });
 document.getElementById('tut-skip').addEventListener('click',e=>{ e.stopPropagation(); nextTutStep(); });
+
+// language — a two-button EN | JP selector; localizes only the tutorial step titles/texts (wired
+// here so it can see lang / showTutStep, defined in this block)
+const langEn=document.getElementById('lang-en'), langJp=document.getElementById('lang-jp');
+function syncLang(){ langEn.classList.toggle('on',lang==='EN'); langJp.classList.toggle('on',lang==='JP'); }
+function setLang(l){
+  if(lang===l) return;
+  lang=l; syncLang();
+  if(tutActive && !tutAdvanceT) showTutStep();      // refresh the open card live (unless mid-confirm)
+}
+langEn.addEventListener('click',e=>{ e.stopPropagation(); setLang('EN'); });
+langJp.addEventListener('click',e=>{ e.stopPropagation(); setLang('JP'); });
+syncLang();
 </script>
 </body>
 </html>
