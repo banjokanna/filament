@@ -572,7 +572,8 @@ function applyChord(c, when){              // set ANY chord (progression chord o
   // the right hand adopts the new chord grooveOffset beats later (on the felt downbeat)
   const t0 = when ?? AC.currentTime;
   const beat = Transport.beatDur || 0;
-  const lagBeats = (CONFIG.beatsPerBar - CONFIG.grooveOffset) % CONFIG.beatsPerBar;
+  const lagBeats = (CONFIG.beatsPerBar - CONFIG.grooveOffset) % CONFIG.beatsPerBar
+                 + (style.leadLagBars||0) * CONFIG.beatsPerBar;
   const delay = Math.max(0,(t0 + lagBeats*beat - AC.currentTime)*1000);
   setTimeout(()=>{ leadChord=c; }, delay);
 }
@@ -1079,16 +1080,16 @@ function scheduleBossaBass(t,b,band){
    and updates the meter/tempo/feel config. The original groove = 'Swing'.
    ================================================================ */
 const STYLES = [
-  { name:'Swing', beatsPerBar:4, bpm:128, swing:0.62, grooveOffset:2,
+  { name:'Swing', beatsPerBar:4, bpm:128, swing:0.62, grooveOffset:2, leadLagBars:0,
     drums:(t,b,band)=> band==='half' ? drumsHalfTime(t,b) : drumsSwing(t,b,band),
     bass: scheduleBass },
-  { name:'Bebop', beatsPerBar:4, bpm:210, swing:0.58, grooveOffset:3,
+  { name:'Bebop', beatsPerBar:4, bpm:210, swing:0.58, grooveOffset:3, leadLagBars:1,
     drums: drumsBebop,
     bass: scheduleBass },
-  { name:'Bossa', beatsPerBar:4, bpm:140, swing:0.50, grooveOffset:2,
+  { name:'Bossa', beatsPerBar:4, bpm:140, swing:0.50, grooveOffset:2, leadLagBars:0,
     drums: drumsBossa,
     bass: scheduleBossaBass },
-  { name:'Waltz', beatsPerBar:3, bpm:150, swing:0.60, grooveOffset:0,
+  { name:'Waltz', beatsPerBar:3, bpm:150, swing:0.60, grooveOffset:0, leadLagBars:1,
     drums: drumsWaltz,
     bass: scheduleWaltzBass },
 ];
