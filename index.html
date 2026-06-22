@@ -103,7 +103,11 @@
   }
   #tutorial .step{font-size:8.5px;letter-spacing:.32em;text-transform:uppercase;color:rgba(232,213,163,.48);margin-bottom:7px;}
   #tutorial .ttl{font-size:15px;letter-spacing:.08em;color:rgba(232,213,163,.96);margin-bottom:7px;}
-  #tutorial .txt{font-size:12px;line-height:1.65;letter-spacing:.03em;color:rgba(232,213,163,.74);min-height:2.6em;white-space:pre-line;}
+  /* fixed 2-line box (centred) so a 1-line and a 2-line step keep the card exactly the same height */
+  #tutorial .txt{
+    font-size:12px;line-height:1.65;letter-spacing:.03em;color:rgba(232,213,163,.74);white-space:pre-line;
+    height:3.3em;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  }
   #tutorial .txt.done{color:#a6e3b8;letter-spacing:.1em;}
   #tutorial .dots{display:flex;gap:5px;justify-content:center;margin-top:13px;}
   #tutorial .dots i{width:5px;height:5px;border-radius:50%;background:rgba(232,213,163,.2);transition:all .3s;}
@@ -157,8 +161,7 @@
 <div id="gear" title="Settings"></div>
 <div id="settings">
   <div class="srow"><span>HUD</span><span class="tog" id="tog-hud">OFF</span></div>
-  <div class="srow"><span>Language</span><span class="seg"><span class="opt on" id="lang-en">EN</span><span class="opt" id="lang-jp">JP</span></span></div>
-  <div class="srow"><span>Tutorial</span><span class="tog" id="tut-start">START</span></div>
+  <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
   <div id="settingsClose" title="Close">✕</div>
 </div>
 
@@ -178,7 +181,7 @@
   <h1>FILAMENT</h1>
   <p>Contemporary jazz at your fingertips.</p>
   <button id="enter">ENTER</button>
-  <div id="copyright">ver. 0.4.0<br>© idiomorph</div>
+  <div id="copyright">ver. 0.5.0<br>© idiomorph</div>
 </div>
 
 <script>
@@ -208,7 +211,7 @@ const CONFIG = {
   bpm: 128,               // medium-up, Rosenwinkel-leaning
   beatsPerBar: 4,
   barsPerPhrase: 4,       // harmony / section boundary granularity
-  lookahead: 0.12,        // s — how far ahead the scheduler reserves audio
+  lookahead: 0.22,        // s — how far ahead the scheduler reserves audio (more cushion = fewer dropouts when the main thread janks)
   schedulerInterval: 25,  // ms — setInterval tick for the look-ahead loop
   catchupResync: 0.25,    // s — if the scheduler falls this far behind (a stall), skip the
                           //    backlog and resume cleanly instead of flooding every missed beat
@@ -1741,13 +1744,22 @@ const veil=document.getElementById('veil');
 function start(){
   if(AC) return;
   buildAudio();
-  if(AC.state==='suspended') AC.resume();
   veil.classList.add('gone');
-  setChord(0, AC.currentTime+0.06);   // lay down the first chord bed
-  Transport.start();                  // …and let the trio run itself
+  // Begin the trio only once the context is actually RUNNING. On mobile, resume() is async;
+  // starting the scheduler against a still-suspended clock (currentTime stuck at 0) was what
+  // sometimes left the band silent until a second tap. We wait for the resume, with a fallback.
+  let begun=false;
+  const begin=()=>{ if(begun) return; begun=true; setChord(0, AC.currentTime+0.06); Transport.start(); };
+  if(AC.state==='running') begin();
+  else { AC.resume().then(begin).catch(begin); setTimeout(begin,300); }   // fallback if resume never settles
+  // keep the audio alive: if the context is ever interrupted/suspended (tab switch, iOS audio
+  // interruption), resume it — this is the "stuck glitchy and won't recover" safety net.
+  AC.onstatechange=()=>{ if(AC.state==='suspended'||AC.state==='interrupted') AC.resume().catch(()=>{}); };
 }
 document.getElementById('enter').addEventListener('click',start);
 veil.addEventListener('pointerdown',start);
+// if the page returns to the foreground with the context not running, bring it back
+document.addEventListener('visibilitychange',()=>{ if(AC && !document.hidden && AC.state!=='running') AC.resume().catch(()=>{}); });
 
 /* two-thumbs routing: a touch starting in the bottom-left zone is the left
    hand (intent); everything else is the voice. Both can be down at once.
@@ -1804,7 +1816,7 @@ const TUTORIAL_STEPS=[
                  titleJP:'ボイス',          textJP:'画面をタッチして指を動かす。\n上下が音程、左右が表情。'},
   {kind:'rflick',title:'Out',               text:'Flick sharply in any direction.\nOne note just outside the key sounds.',
                  titleJP:'アウト',          textJP:'任意の向きに鋭くフリック。\nキー外の音が一つ鳴ります。'},
-  {kind:'temp',  title:'Temperature',       text:'Drag up in the bottom-left to heat the band, down to cool.\nIt drifts back a while after you release.',
+  {kind:'temp',  title:'Temperature',       text:'Drag up in the bottom-left to heat, down to cool.\nIt drifts back a moment after you release.',
                  titleJP:'温度',            textJP:'画面左下を上にドラッグでバンドを加熱、下で冷却。\n離してしばらくすると元に戻ります。'},
   {kind:'hold',  title:'Breath',            text:'Hold in the bottom-left and the band holds its breath.\nIt returns the moment you release.',
                  titleJP:'ブレス',          textJP:'画面左下をホールドする間、バンドが息を潜める。\n離すとすぐに戻ります。'},
@@ -1844,11 +1856,13 @@ function showTutStep(){
 function startTutorial(){
   if(!AC) start();                 // make sure the band is running so results are audible
   tutActive=true; tutStep=0; clearTimeout(tutAdvanceT); tutAdvanceT=null;
+  if(dbgEl) dbgEl.style.display='none';   // hide the HUD during the tutorial, even if it's ON
   tutEl.classList.add('open'); showTutStep();
 }
 function endTutorial(){
   tutActive=false; clearTimeout(tutAdvanceT); tutAdvanceT=null;
   tutEl.classList.remove('open');
+  if(dbgEl) dbgEl.style.display = CONFIG.debug ? 'block' : 'none';   // restore the HUD to its setting
 }
 function nextTutStep(){
   clearTimeout(tutAdvanceT); tutAdvanceT=null;
@@ -1862,21 +1876,13 @@ function tutorialNotify(kind){
   tutTxtEl.textContent='✓  nice'; tutTxtEl.classList.add('done');   // confirmation stays English in both langs
   tutAdvanceT=setTimeout(nextTutStep,1100);          // let the result land, then advance
 }
-document.getElementById('tut-start').addEventListener('click',e=>{ e.stopPropagation(); closeSettings(); startTutorial(); });
 document.getElementById('tut-skip').addEventListener('click',e=>{ e.stopPropagation(); nextTutStep(); });
 
-// language — a two-button EN | JP selector; localizes only the tutorial step titles/texts (wired
-// here so it can see lang / showTutStep, defined in this block)
-const langEn=document.getElementById('lang-en'), langJp=document.getElementById('lang-jp');
-function syncLang(){ langEn.classList.toggle('on',lang==='EN'); langJp.classList.toggle('on',lang==='JP'); }
-function setLang(l){
-  if(lang===l) return;
-  lang=l; syncLang();
-  if(tutActive && !tutAdvanceT) showTutStep();      // refresh the open card live (unless mid-confirm)
-}
-langEn.addEventListener('click',e=>{ e.stopPropagation(); setLang('EN'); });
-langJp.addEventListener('click',e=>{ e.stopPropagation(); setLang('JP'); });
-syncLang();
+// Tutorial launch: two buttons EN | JP — the one you press picks the tutorial's language
+// (the only place language is chosen; it localizes just the step titles/texts).
+function launchTutorial(l){ lang=l; closeSettings(); startTutorial(); }
+document.getElementById('tut-en').addEventListener('click',e=>{ e.stopPropagation(); launchTutorial('EN'); });
+document.getElementById('tut-jp').addEventListener('click',e=>{ e.stopPropagation(); launchTutorial('JP'); });
 </script>
 </body>
 </html>
