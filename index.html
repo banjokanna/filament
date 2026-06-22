@@ -333,7 +333,7 @@ const TIMBRES = [
   // B — bright, round, lush chorus + long delay, very clean
   {name:'Tone B', o1:'triangle', o2:'triangle', det1:9,  det2:-11, sawLo:0.04, sawHi:0.30, fltLo:1000, fltHi:5200, q:0.7, vibHz:4.5, vibCents:12, atk:0.05,  rel:1.0, sat0:0.8, sat1:1.5, rev:0.9, dly:1.5, post:0.80},
   // C — liquid legato, wide chorus, smooth overdrive, long sustain (quieter still)
-  {name:'Tone C', o1:'sawtooth', o2:'triangle', det1:7,  det2:-9,  sawLo:0.06, sawHi:0.34, fltLo:800,  fltHi:4200, q:0.6, vibHz:5.0, vibCents:10, atk:0.06,  rel:1.6, sat0:1.2, sat1:2.2, rev:0.95, dly:0.6, post:0.35},
+  {name:'Tone C', o1:'sawtooth', o2:'triangle', det1:7,  det2:-9,  sawLo:0.06, sawHi:0.34, fltLo:800,  fltHi:4200, q:0.6, vibHz:5.0, vibCents:10, atk:0.035, rel:1.6, sat0:1.2, sat1:2.2, rev:0.95, dly:0.6, post:0.35},
 ];
 let timbreIdx=0, timbre=TIMBRES[0];
 
@@ -1032,8 +1032,8 @@ function drumsWaltz(t,b,band){
   // jazz waltz ride: 1 · 2& · 3
   ride(j(),(b===0?0.75:0.55)*acc,P.legato);
   if(b===1 && Math.random()<lerp(0.6,0.9,E)) ride(t+off+rand(-0.005,0.005),0.4*acc,P.legato);
-  if(b===1) hat(j(),0.45*acc);
-  if(Math.random()<lerp(0.03,0.12,E)) snare(t+off,rand(0.1,0.2)*acc);
+  if(b===1) hat(j(),0.28*acc);
+  if(b!==0 && Math.random()<lerp(0.03,0.10,E)) snare(t+off,rand(0.06,0.14)*acc);
   if(b===0 && Math.random()<0.5) kick(j(),0.16);
   if(b===2 && Math.random()<lerp(0,0.25,E)) kick(j(),0.14);
 
@@ -1085,7 +1085,7 @@ const STYLES = [
   { name:'Bebop', beatsPerBar:4, bpm:210, swing:0.58, grooveOffset:3,
     drums: drumsBebop,
     bass: scheduleBass },
-  { name:'Bossa', beatsPerBar:4, bpm:120, swing:0.50, grooveOffset:2,
+  { name:'Bossa', beatsPerBar:4, bpm:140, swing:0.50, grooveOffset:2,
     drums: drumsBossa,
     bass: scheduleBossaBass },
   { name:'Waltz', beatsPerBar:3, bpm:150, swing:0.60, grooveOffset:0,
