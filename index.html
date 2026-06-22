@@ -211,6 +211,9 @@ const CONFIG = {
   // ---- Transport ----
   bpm: 128,               // medium-up, Rosenwinkel-leaning
   beatsPerBar: 4,
+  grooveOffset: 2,        // shift the GROOVE (drums/bass/beat-bloom + the down-flick fill) this many
+                          //    beats relative to the harmony, so the felt downbeat moves to where the
+                          //    slow chord swell peaks. 0 = old behaviour. (perceived-"1" alignment)
   barsPerPhrase: 4,       // harmony / section boundary granularity
   lookahead: 0.22,        // s — how far ahead the scheduler reserves audio (more cushion = fewer dropouts when the main thread janks)
   schedulerInterval: 25,  // ms — setInterval tick for the look-ahead loop
@@ -1020,18 +1023,19 @@ const Transport = {
     if(AC.currentTime - this.nextBeatTime > CONFIG.catchupResync) this.nextBeatTime = AC.currentTime + 0.06;
     while(this.nextBeatTime < AC.currentTime + CONFIG.lookahead){
       const t=this.nextBeatTime, b=this.beat;
-      const beatInBar=b%CONFIG.beatsPerBar;
+      const beatInBar=b%CONFIG.beatsPerBar;            // harmonic grid (chord changes anchor here)
       const bar=Math.floor(b/CONFIG.beatsPerBar);
+      const gBeat=(b+CONFIG.grooveOffset)%CONFIG.beatsPerBar;  // groove grid — the felt downbeat
 
-      if(beatInBar===0) this.onBar(t,bar);
-      this.onBeat(t,beatInBar,bar);
+      if(beatInBar===0) this.onBar(t,bar);             // harmony unchanged (the chord still changes here)
+      this.onBeat(t,gBeat,bar);                        // drums + bass follow the shifted groove
       // a queued fill fires once the scheduler reaches its beat (down-flick / progression change)
       if(fillAtBeat>=0 && b>=fillAtBeat){
         if(!suspended) drumFill(t,bandStrength());
         if(!suspended) scheduleFillLanding(t);   // amber bloom synced to the audio — for BOTH the down-flick and the progression fill
         fillAtBeat=-1; fillManual=false;
       }
-      scheduleVisualPulse(t,beatInBar);
+      scheduleVisualPulse(t,gBeat);                    // the beat-bloom downbeat follows the groove too
 
       this.nextBeatTime+=this.beatDur;
       this.beat++;
@@ -1506,7 +1510,9 @@ function fireFill(){
   // fill slides to the end of the next bar so it never lands behind the beat.
   if(!AC) return;
   const bpb=CONFIG.beatsPerBar;
-  let last=Math.floor(Transport.beat/bpb)*bpb+(bpb-1);
+  // the beat just before the next GROOVE downbeat (so the fill resolves on the felt "1")
+  const phase=((bpb-1-CONFIG.grooveOffset)%bpb+bpb)%bpb;
+  let last=Math.floor(Transport.beat/bpb)*bpb+phase;
   while(last<Transport.beat) last+=bpb;                    // ensure the scheduler hasn't passed it
   fillAtBeat=last; fillManual=true;
   // No instant flash — a fill isn't a one-shot. Instead a countdown bar fills toward the
