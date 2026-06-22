@@ -60,7 +60,7 @@
     padding:9px 2px;border-bottom:1px solid rgba(232,213,163,.12);
   }
   /* all right-side controls share one width so they line up (matches the EN|JP segment) */
-  .srow .tog,.srow .seg{box-sizing:border-box;width:104px;}
+  .srow .tog,.srow .seg{box-sizing:border-box;width:156px;}
   .srow .tog{
     font-size:10px;letter-spacing:.22em;color:rgba(232,213,163,.5);
     border:1px solid rgba(232,213,163,.3);border-radius:2px;padding:4px 11px;
@@ -161,7 +161,7 @@
 <div id="gear" title="Settings"></div>
 <div id="settings">
   <div class="srow"><span>Style</span><span class="seg" id="style-seg"><span class="opt on" id="style-0">Sw</span><span class="opt" id="style-1">Bb</span><span class="opt" id="style-2">Bo</span><span class="opt" id="style-3">Wz</span></span></div>
-  <div class="srow"><span>HUD</span><span class="tog" id="tog-hud">OFF</span></div>
+  <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
   <div id="settingsClose" title="Close">✕</div>
@@ -1663,7 +1663,9 @@ function commitProgression(i){
   pendingProg=i; tutorialNotify('swipe');                  // the V7 pivot fires at the next chord boundary
   const span=CONFIG.chordChangeEveryBars*CONFIG.beatsPerBar, P=beatPos();
   const pivotBeat=Math.ceil((P+0.001)/span)*span;          // next boundary = pivot starts
-  gaugeFrom=P; gaugeTo=pivotBeat+span;                      // …dominant ends one slot later = destination
+  const arrival=pivotBeat+span;                             // when the destination chord lands (band)
+  const lagBeats=(style.leadLagBars||0)*CONFIG.beatsPerBar; // extra delay until the player perceives it
+  gaugeFrom=P; gaugeTo=arrival+lagBeats;                    // gauge fills to the PERCEIVED change
   gaugeWallStart=performance.now();                        // drive the bar off wall-clock (smooth, no beat-step)
   gaugeWallEnd=gaugeWallStart+(gaugeTo-P)*Transport.beatDur*1000;
   fillAtBeat=Math.round(gaugeTo)-1;                        // announce the change NOW: fill the beat before it lands
@@ -2029,17 +2031,18 @@ cv.addEventListener('pointercancel',routeEnd);
    above the canvas, so tapping it never triggers a lead note. Grows over time;
    for now it just hosts the debug-HUD toggle. */
 const settingsEl=document.getElementById('settings');
-const togHud=document.getElementById('tog-hud');
-function syncHud(){                                    // reflect CONFIG.debug in the HUD + toggle
+const hudOn=document.getElementById('hud-on'), hudOff=document.getElementById('hud-off');
+function syncHud(){
   if(dbgEl) dbgEl.style.display = CONFIG.debug ? 'block' : 'none';
-  togHud.textContent = CONFIG.debug ? 'ON' : 'OFF';
-  togHud.classList.toggle('on', CONFIG.debug);
+  hudOn.classList.toggle('on', CONFIG.debug);
+  hudOff.classList.toggle('on', !CONFIG.debug);
 }
 function openSettings(){ syncHud(); settingsEl.classList.add('open'); }
 function closeSettings(){ settingsEl.classList.remove('open'); }
 document.getElementById('gear').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();openSettings();});
 document.getElementById('settingsClose').addEventListener('click',e=>{e.stopPropagation();closeSettings();});
-togHud.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=!CONFIG.debug; syncHud(); });
+hudOn.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=true; syncHud(); });
+hudOff.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=false; syncHud(); });
 // Voice timbre — a three-button A | B | C selector; applies live so you can audition
 const voiceOpts=[document.getElementById('voice-0'),document.getElementById('voice-1'),document.getElementById('voice-2')];
 function syncVoice(){ voiceOpts.forEach((el,i)=>el.classList.toggle('on', i===timbreIdx)); }
