@@ -48,16 +48,15 @@
   #settings{
     position:fixed;inset:0;z-index:9;display:none;
     flex-direction:column;align-items:center;justify-content:center;gap:26px;
-    background:radial-gradient(ellipse at 50% 55%,rgba(8,9,20,.94),rgba(4,5,12,.97));
+    background:transparent;
     color:var(--gold);text-align:center;padding:32px;
-    -webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);
   }
   #settings.open{display:flex;}
   .srow{
     display:flex;align-items:center;justify-content:space-between;
     width:min(82vw,360px);gap:24px;
     font-size:11px;letter-spacing:.18em;color:rgba(232,213,163,.85);
-    padding:9px 2px;border-bottom:1px solid rgba(232,213,163,.12);
+    padding:9px 2px;
   }
   /* all right-side controls share one width so they line up (matches the EN|JP segment) */
   .srow .tog,.srow .seg{box-sizing:border-box;width:156px;}
@@ -68,22 +67,14 @@
   }
   .srow .tog.on{color:var(--ink);background:var(--gold);border-color:var(--gold);box-shadow:0 0 12px rgba(255,179,92,.5);}
   /* segmented control (EN | JP) — two options side by side, the active one filled */
-  .srow .seg{display:flex;border:1px solid rgba(232,213,163,.3);border-radius:2px;overflow:hidden;}
+  .srow .seg{display:flex;border:1px solid rgba(232,213,163,.3);border-radius:2px;overflow:hidden;
+    background:rgba(6,7,16,.82);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
   .srow .seg .opt{
     flex:1;font-size:10px;letter-spacing:.18em;color:rgba(232,213,163,.5);
     padding:4px 0;cursor:pointer;transition:all .2s;text-align:center;
   }
   .srow .seg .opt+.opt{border-left:1px solid rgba(232,213,163,.3);}
   .srow .seg .opt.on{color:var(--ink);background:var(--gold);}
-  /* close = thin X sitting where the gold dot is (same 40px hit box, corner-aligned) */
-  #settingsClose{
-    position:fixed;right:6px;bottom:calc(6px + env(safe-area-inset-bottom));z-index:10;
-    width:40px;height:40px;display:flex;align-items:center;justify-content:center;
-    font-family:inherit;font-weight:200;font-size:17px;line-height:1;
-    color:rgba(232,213,163,.55);cursor:pointer;-webkit-tap-highlight-color:transparent;
-    transition:color .3s,transform .3s;
-  }
-  #settingsClose:hover{color:rgba(232,213,163,.95);transform:scale(1.1);}
   .srow .tog:focus{outline:none;}
 
   /* ---------- interactive tutorial — a top card; the canvas stays playable beneath it ---------- */
@@ -164,7 +155,6 @@
   <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
-  <div id="settingsClose" title="Close">✕</div>
 </div>
 
 <div id="tutorial">
@@ -1976,7 +1966,7 @@ function frame(){
       'chord '+leadChord.name+'\n'+
       'lead '+leadNote+'  i'+leadIntensity.toFixed(2)+'\n'+
       'band '+BandBrain.effDrive.toFixed(2)+'→'+BandBrain.target.toFixed(2)+(BandBrain.dev?('  ✦'+BandBrain.dev.type):'')+'\n'+
-      'fill '+(fillRem>=0?('⏳ '+fillRem+'b → s'+bandStrength().toFixed(2)):'—');
+      'fill '+(fillRem>=0?(fillRem+'b → s'+bandStrength().toFixed(2)):'—');
   }
   requestAnimationFrame(frame);
 }
@@ -2011,6 +2001,7 @@ document.addEventListener('visibilitychange',()=>{ if(AC && !document.hidden && 
    Routing thereafter is by pointerId, and capture keeps slides tracked. */
 function routeDown(e){
   e.preventDefault();
+  if(settingsOpen()) return;
   try{ cv.setPointerCapture(e.pointerId); }catch(_){}   // capture can fail on odd pointers; harmless
   if(left.pid===null && inLeftZone(e.clientX,e.clientY)) leftDown(e);
   else leadDown(e);
@@ -2040,17 +2031,20 @@ function syncHud(){
   hudOn.classList.toggle('on', CONFIG.debug);
   hudOff.classList.toggle('on', !CONFIG.debug);
 }
-function openSettings(){ syncHud(); settingsEl.classList.add('open'); }
+function settingsOpen(){ return settingsEl.classList.contains('open'); }
+function openSettings(){
+  if(tutActive) endTutorial();
+  syncHud(); settingsEl.classList.add('open');
+}
 function closeSettings(){ settingsEl.classList.remove('open'); }
 document.getElementById('gear').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();openSettings();});
-document.getElementById('settingsClose').addEventListener('click',e=>{e.stopPropagation();closeSettings();});
 hudOn.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=true; syncHud(); });
 hudOff.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=false; syncHud(); });
 // Voice timbre — a three-button A | B | C selector; applies live so you can audition
 const voiceOpts=[document.getElementById('voice-0'),document.getElementById('voice-1'),document.getElementById('voice-2')];
 function syncVoice(){ voiceOpts.forEach((el,i)=>el.classList.toggle('on', i===timbreIdx)); }
 voiceOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); setTimbre(i); syncVoice(); }));
-// tap the dim backdrop (outside the rows) to close
+// tap the backdrop (outside the buttons) to close
 settingsEl.addEventListener('pointerdown',e=>{ if(e.target===settingsEl) closeSettings(); });
 // Style selector — fade out → swap genre → reset transport → fade in
 const styleOpts=[document.getElementById('style-0'),document.getElementById('style-1'),document.getElementById('style-2'),document.getElementById('style-3')];
@@ -2152,8 +2146,8 @@ document.getElementById('tut-skip').addEventListener('click',e=>{ e.stopPropagat
 // Tutorial launch: two buttons EN | JP — the one you press picks the tutorial's language
 // (the only place language is chosen; it localizes just the step titles/texts).
 function launchTutorial(l){ lang=l; closeSettings(); startTutorial(); }
-document.getElementById('tut-en').addEventListener('click',e=>{ e.stopPropagation(); launchTutorial('EN'); });
-document.getElementById('tut-jp').addEventListener('click',e=>{ e.stopPropagation(); launchTutorial('JP'); });
+document.getElementById('tut-en').addEventListener('click',e=>{ e.stopPropagation(); closeSettings(); launchTutorial('EN'); });
+document.getElementById('tut-jp').addEventListener('click',e=>{ e.stopPropagation(); closeSettings(); launchTutorial('JP'); });
 </script>
 </body>
 </html>
