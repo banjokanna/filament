@@ -520,6 +520,11 @@ let chordIdx=0, chord=CHORDS[0], padVoices=[];
 
 const inScale  = m=>chord.scale.includes(((m%12)+12)%12);
 const isTonePc = m=>chord.tones.includes(((m%12)+12)%12);
+// the right hand snaps to a chord that LAGS the real harmony by grooveOffset beats, so its
+// notes switch on the felt (groove) downbeat — while the band/pad keep the real `chord`.
+let leadChord = chord;
+const inScaleLead  = m=>leadChord.scale.includes(((m%12)+12)%12);
+const isTonePcLead = m=>leadChord.tones.includes(((m%12)+12)%12);
 function scaleStep(m,steps){            // walk n steps along the current scale
   let cur=m; const s=Math.sign(steps)||1;
   for(let i=0;i<Math.abs(steps);i++){
@@ -561,6 +566,11 @@ function playPad(c, when){
 
 function applyChord(c, when){              // set ANY chord (progression chord or a transient pivot)
   chord=c; bgTensionTarget=c.tension; playPad(c, when);
+  // the right hand adopts the new chord grooveOffset beats later (on the felt downbeat)
+  const t0 = when ?? AC.currentTime;
+  const beat = Transport.beatDur || 0;
+  const delay = Math.max(0,(t0 + CONFIG.grooveOffset*beat - AC.currentTime)*1000);
+  setTimeout(()=>{ leadChord=c; }, delay);
 }
 function setChord(i, when){ chordIdx=i; applyChord(CHORDS[i], when); }
 function advanceChord(when){ setChord((chordIdx+1)%CHORDS.length, when); }
@@ -1089,9 +1099,9 @@ function snapToAvailable(target){
   let best=null, score=-1e9;
   for(let m=Math.round(target)-4;m<=Math.round(target)+4;m++){
     if(m<lo||m>hi) continue;
-    if(!inScale(m)) continue;
+    if(!inScaleLead(m)) continue;
     let s=-Math.abs(target-m)*1.1;
-    if(isTonePc(m)) s+=CONFIG.chordToneWeight;
+    if(isTonePcLead(m)) s+=CONFIG.chordToneWeight;
     s+=Math.random()*CONFIG.snapWaver;
     if(s>score){ score=s; best=m; }
   }
@@ -1274,15 +1284,15 @@ function updateIntensity(){
    a half-step OUT (in the flick direction) for a moment, then RESOLVE by half-step
    back into a chord tone — a chromatic approach. Always resolves, so it reads as
    intentional, not as a wrong note. */
-function resolveTone(m,dir){          // nearest chord tone from m, searching in dir
+function resolveTone(m,dir){          // nearest chord tone from m, searching in dir (lagged lead chord)
   let n=m, g=0;
-  while(!isTonePc(n) && g++<13) n+=dir;
+  while(!isTonePcLead(n) && g++<13) n+=dir;
   return clamp(n,CONFIG.leadLo,CONFIG.leadHi);
 }
-function nearestTone(m){              // nearest chord tone either side of m
+function nearestTone(m){              // nearest chord tone either side of m (lagged lead chord)
   for(let d=0;d<=6;d++){
-    if(isTonePc(m+d)) return clamp(m+d,CONFIG.leadLo,CONFIG.leadHi);
-    if(isTonePc(m-d)) return clamp(m-d,CONFIG.leadLo,CONFIG.leadHi);
+    if(isTonePcLead(m+d)) return clamp(m+d,CONFIG.leadLo,CONFIG.leadHi);
+    if(isTonePcLead(m-d)) return clamp(m-d,CONFIG.leadLo,CONFIG.leadHi);
   }
   return clamp(m,CONFIG.leadLo,CONFIG.leadHi);
 }
@@ -1790,7 +1800,7 @@ function frame(){
       '▸ '+dbgAction+'\n'+
       'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+'\n'+
       'prog '+PROGRESSIONS[progIdx].name+'\n'+
-      'chord '+chord.name+'\n'+
+      'chord '+leadChord.name+'\n'+
       'lead '+leadNote+'  i'+leadIntensity.toFixed(2)+'\n'+
       'band '+BandBrain.effDrive.toFixed(2)+'→'+BandBrain.target.toFixed(2)+(BandBrain.dev?('  ✦'+BandBrain.dev.type):'')+'\n'+
       'fill '+(fillRem>=0?('⏳ '+fillRem+'b → s'+bandStrength().toFixed(2)):'—');
