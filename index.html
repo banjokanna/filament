@@ -1966,6 +1966,7 @@ function frame(){
     dbgEl.textContent =
       '▸ '+dbgAction+'\n'+
       'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+'\n'+
+      'style '+style.name+'\n'+
       'prog '+PROGRESSIONS[progIdx].name+'\n'+
       'chord '+leadChord.name+'\n'+
       'lead '+leadNote+'  i'+leadIntensity.toFixed(2)+'\n'+
@@ -2059,6 +2060,9 @@ function switchStyle(i){
     Transport.beat=0; Transport.nextBeatTime=AC.currentTime+0.08;
     bassBusyBeat=0; fillAtBeat=-1; fillManual=false;
     pendingProg=null; pivotChord=null; gaugeFrom=0; gaugeTo=0;
+    bassCur=lowNear(chord.tones[0],36);
+    BandBrain.reset();
+    if(bandDry) bandDry.gain.setValueAtTime(lerp(0.62,1.12,BandBrain.effDrive),AC.currentTime);
     master.gain.setTargetAtTime(CONFIG.masterGain, AC.currentTime, dur/4);
   }, dur*1000);
 }
