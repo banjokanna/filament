@@ -160,6 +160,7 @@
 <div id="dbg"></div>
 <div id="gear" title="Settings"></div>
 <div id="settings">
+  <div class="srow"><span>Style</span><span class="seg" id="style-seg"><span class="opt on" id="style-0">Sw</span><span class="opt" id="style-1">Bb</span><span class="opt" id="style-2">Bo</span><span class="opt" id="style-3">Wz</span></span></div>
   <div class="srow"><span>HUD</span><span class="tog" id="tog-hud">OFF</span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
@@ -700,6 +701,24 @@ function kick(t,vel){
   env.gain.exponentialRampToValueAtTime(0.0001,t+0.13);
   o.connect(env);env.connect(bandDry);o.start(t);o.stop(t+0.16);
 }
+function rimClick(t,vel){
+  // cross-stick: a dry woody click — snare shell tone without the rattle
+  const o=AC.createOscillator();o.type='triangle';
+  o.frequency.setValueAtTime(1800,t);
+  o.frequency.exponentialRampToValueAtTime(900,t+0.02);
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(vel*0.25,t+0.002);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.06);
+  o.connect(env);env.connect(bandDry);o.start(t);o.stop(t+0.08);
+  const s=noiseSrc(t,0.04);
+  const bp=AC.createBiquadFilter();bp.type='bandpass';bp.frequency.value=3200;bp.Q.value=2;
+  const ne=AC.createGain();
+  ne.gain.setValueAtTime(0.0001,t);
+  ne.gain.exponentialRampToValueAtTime(vel*0.12,t+0.002);
+  ne.gain.exponentialRampToValueAtTime(0.0001,t+0.04);
+  s.connect(bp);bp.connect(ne);ne.connect(bandDry);
+}
 function bassPluck(t,midi,vel,dur){
   const f=mtof(midi);
   const o1=AC.createOscillator();o1.type='sine';o1.frequency.value=f;
@@ -825,6 +844,56 @@ function drumsHalfTime(t,b){
   if(Math.random()<0.04) snare(t+Transport.beatDur*CONFIG.swing,0.12); // a rare brushed ghost
 }
 
+/* BEBOP (~210 bpm) — fast ride-led swing with sparse comping and feathered kick.
+   At this tempo the ride IS the groove; snare drops are conversational, not rhythmic. */
+function drumsBebop(t,b,band){
+  const BEAT=Transport.beatDur, off=BEAT*CONFIG.swing, j=()=>t+rand(-0.004,0.004);
+  const P=BandBrain.parts, E=P.drums, acc=lerp(0.72,1.1,P.accent);
+  const backbeat=(b===1||b===3);
+
+  if(band==='half'){
+    if(b===0||b===2) ride(j(),0.45*acc,0.9);
+    if(backbeat) hat(j(),0.35*acc);
+    if(b===0 && Math.random()<0.35) kick(j(),0.1);
+    return;
+  }
+  ride(j(),(backbeat?0.85:0.6)*acc,P.legato);
+  if(Math.random()<lerp(0.5,0.85,E)) ride(t+off+rand(-0.004,0.004),0.4*acc,P.legato);
+  if(backbeat) hat(j(),0.55*acc);
+  if(Math.random()<lerp(0.04,0.15,E)) snare(t+(Math.random()<0.5?0:off),rand(0.3,0.55)*acc);
+  if(b===0 && Math.random()<0.4) kick(j(),0.12);
+
+  if(band==='burn'){
+    const r=clamp((E-CONFIG.groove.burningAbove)/(1-CONFIG.groove.burningAbove),0,1);
+    if(Math.random()<0.12*r) snare(t+off,rand(0.4,0.6));
+    if(b===CONFIG.beatsPerBar-1 && Math.random()<CONFIG.groove.burnFillProb*0.6*r) drumFill(t,bandStrength());
+  }
+}
+
+/* BOSSA (~120 bpm, straight eighths) — rim click on 2 & 4, soft hat eighths,
+   kick on 1 and the & of 2. No ride cymbal — the cross-stick carries the feel. */
+function drumsBossa(t,b,band){
+  const BEAT=Transport.beatDur, j=()=>t+rand(-0.003,0.003);
+  const P=BandBrain.parts, acc=lerp(0.65,1.0,P.accent);
+
+  if(band==='half'){
+    if(b===1||b===3) rimClick(j(),0.45*acc);
+    if(b===0 && Math.random()<0.3) kick(j(),0.1);
+    return;
+  }
+  hat(j(),0.3*acc);
+  if(Math.random()<0.85) hat(t+BEAT*0.5+rand(-0.003,0.003),0.22*acc);
+  if(b===1||b===3) rimClick(j(),0.7*acc);
+  if(b===0) kick(j(),0.2);
+  if(b===1 && Math.random()<0.7) kick(t+BEAT*0.5+rand(-0.003,0.003),0.18);
+  if(Math.random()<0.08) snare(t+BEAT*0.5,rand(0.08,0.15)*acc);
+
+  if(band==='burn'){
+    if(Math.random()<0.3) rimClick(t+BEAT*0.5,0.35*acc);
+    if(Math.random()<0.15) kick(t+BEAT*0.5,0.15);
+  }
+}
+
 /* band energy as a 0..1 fill strength — cool bands get a small fill, hot bands a flashy one */
 function bandStrength(){ return clamp(BandBrain.effDrive,0,1); }
 
@@ -935,6 +1004,62 @@ function bass2BeatTriplet(t,b){                             // 2-beat (quarter-n
   bassCur=m;
 }
 
+/* WALTZ (3/4 ~150 bpm) — jazz waltz ride pattern: dotted-quarter feel with
+   the ride landing on 1, the & of 2, and 3. Brush-like snare on 2 & 3. */
+function drumsWaltz(t,b,band){
+  const BEAT=Transport.beatDur, off=BEAT*CONFIG.swing, j=()=>t+rand(-0.005,0.005);
+  const P=BandBrain.parts, E=P.drums, acc=lerp(0.68,1.05,P.accent);
+
+  if(band==='half'){
+    if(b===0) ride(j(),0.5*acc,0.9);
+    if(b===2 && Math.random()<0.5) hat(j(),0.3*acc);
+    if(b===0 && Math.random()<0.4) kick(j(),0.12);
+    return;
+  }
+  // jazz waltz ride: 1 · 2& · 3
+  ride(j(),(b===0?0.75:0.55)*acc,P.legato);
+  if(b===1 && Math.random()<lerp(0.6,0.9,E)) ride(t+off+rand(-0.005,0.005),0.4*acc,P.legato);
+  if(b===1) hat(j(),0.45*acc);
+  if(Math.random()<lerp(0.03,0.12,E)) snare(t+off,rand(0.1,0.2)*acc);
+  if(b===0 && Math.random()<0.5) kick(j(),0.16);
+  if(b===2 && Math.random()<lerp(0,0.25,E)) kick(j(),0.14);
+
+  if(band==='burn'){
+    const r=clamp((E-CONFIG.groove.burningAbove)/(1-CONFIG.groove.burningAbove),0,1);
+    if(Math.random()<0.1*r) snare(t+off,rand(0.35,0.55));
+    if(b===CONFIG.beatsPerBar-1 && Math.random()<CONFIG.groove.burnFillProb*0.5*r) drumFill(t,bandStrength());
+  }
+}
+function scheduleWaltzBass(t,b,band){
+  const BEAT=Transport.beatDur, j=()=>t+rand(-0.004,0.004);
+  const acc=lerp(0.72,1.1,BandBrain.parts.accent);
+  if(band==='half'){
+    if(b===0){ bassCur=lowNear(chord.tones[0],bassCur); bassPluck(j(),bassCur,0.8*acc,BEAT*3); }
+    return;
+  }
+  if(Math.random()>=CONFIG.bassWalkProb) return;
+  bassPluck(j(),bassNoteFor(b),(b===0?0.88:rand(0.6,0.8))*acc,BEAT);
+}
+
+/* BOSSA bass — root on 1, fifth on 3, occasional chromatic approach on 4.
+   Long open notes; no walking — the stillness is the feel. */
+function scheduleBossaBass(t,b,band){
+  const BEAT=Transport.beatDur, j=()=>t+rand(-0.003,0.003);
+  const acc=lerp(0.72,1.1,BandBrain.parts.accent);
+  if(b===0){
+    bassCur=lowNear(chord.tones[0],bassCur);
+    bassPluck(j(),bassCur,0.85*acc,BEAT*2);
+  }else if(b===2){
+    bassCur=lowNear(chord.tones[2]??chord.tones[0],bassCur);
+    bassPluck(j(),bassCur,0.75*acc,BEAT*2);
+  }
+  if(b===3 && Math.random()<0.35){
+    const tgt=lowNear(chord.tones[0],bassCur);
+    bassCur=clamp(tgt+(Math.random()<0.5?1:-1),26,46);
+    bassPluck(j(),bassCur,0.5*acc,BEAT*0.8);
+  }
+}
+
 /* ================================================================
    STYLES — selectable genre grooves (meter / tempo / feel / kit). Each
    supplies its own per-beat drums+bass; setStyle() swaps the active one
@@ -944,6 +1069,15 @@ const STYLES = [
   { name:'Swing', beatsPerBar:4, bpm:128, swing:0.62, grooveOffset:2,
     drums:(t,b,band)=> band==='half' ? drumsHalfTime(t,b) : drumsSwing(t,b,band),
     bass: scheduleBass },
+  { name:'Bebop', beatsPerBar:4, bpm:210, swing:0.58, grooveOffset:2,
+    drums: drumsBebop,
+    bass: scheduleBass },
+  { name:'Bossa', beatsPerBar:4, bpm:120, swing:0.50, grooveOffset:0,
+    drums: drumsBossa,
+    bass: scheduleBossaBass },
+  { name:'Waltz', beatsPerBar:3, bpm:150, swing:0.60, grooveOffset:0,
+    drums: drumsWaltz,
+    bass: scheduleWaltzBass },
 ];
 let styleIdx=0, style=STYLES[0];
 function setStyle(i){
@@ -1897,7 +2031,23 @@ function syncVoice(){ voiceOpts.forEach((el,i)=>el.classList.toggle('on', i===ti
 voiceOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); setTimbre(i); syncVoice(); }));
 // tap the dim backdrop (outside the rows) to close
 settingsEl.addEventListener('pointerdown',e=>{ if(e.target===settingsEl) closeSettings(); });
-syncHud(); syncVoice();   // initial state (language toggle is wired after the tutorial block, below)
+// Style selector — fade out → swap genre → reset transport → fade in
+const styleOpts=[document.getElementById('style-0'),document.getElementById('style-1'),document.getElementById('style-2'),document.getElementById('style-3')];
+function syncStyle(){ styleOpts.forEach((el,i)=>el.classList.toggle('on', i===styleIdx)); }
+function switchStyle(i){
+  if(i===styleIdx) return;
+  if(!AC) { setStyle(i); syncStyle(); return; }
+  styleIdx=i; syncStyle();
+  const dur=0.35;
+  master.gain.setTargetAtTime(0, AC.currentTime, dur/4);
+  setTimeout(()=>{
+    setStyle(i);
+    Transport.beat=0; Transport.nextBeatTime=AC.currentTime+0.08;
+    master.gain.setTargetAtTime(CONFIG.masterGain, AC.currentTime, dur/4);
+  }, dur*1000);
+}
+styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); switchStyle(i); syncStyle(); }));
+syncHud(); syncVoice(); syncStyle();   // initial state (language toggle is wired after the tutorial block, below)
 
 /* ---------------- interactive tutorial ----------------
    Launched from the settings panel. A top card names a gesture and waits; the band
