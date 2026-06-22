@@ -1085,7 +1085,7 @@ const STYLES = [
   { name:'Bebop', beatsPerBar:4, bpm:210, swing:0.58, grooveOffset:3,
     drums: drumsBebop,
     bass: scheduleBass },
-  { name:'Bossa', beatsPerBar:4, bpm:120, swing:0.50, grooveOffset:0,
+  { name:'Bossa', beatsPerBar:4, bpm:120, swing:0.50, grooveOffset:2,
     drums: drumsBossa,
     bass: scheduleBossaBass },
   { name:'Waltz', beatsPerBar:3, bpm:150, swing:0.60, grooveOffset:0,
@@ -2056,6 +2056,8 @@ function switchStyle(i){
   setTimeout(()=>{
     setStyle(i);
     Transport.beat=0; Transport.nextBeatTime=AC.currentTime+0.08;
+    bassBusyBeat=0; fillAtBeat=-1; fillManual=false;
+    pendingProg=null; pivotChord=null; gaugeFrom=0; gaugeTo=0;
     master.gain.setTargetAtTime(CONFIG.masterGain, AC.currentTime, dur/4);
   }, dur*1000);
 }
