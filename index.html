@@ -778,9 +778,8 @@ function scheduleBeat(t,beatInBar){
   if(suspended) return;                                     // 間 (hold) — full hush
   const E=BandBrain.effDrive, G=CONFIG.groove;
   const band = E<G.halfTimeBelow ? 'half' : (E>G.burningAbove ? 'burn' : 'swing');
-  if(band==='half') drumsHalfTime(t,beatInBar);
-  else drumsSwing(t,beatInBar,band);
-  scheduleBass(t,beatInBar,band);
+  style.drums(t,beatInBar,band);                            // the active genre supplies the kit/pattern
+  style.bass(t,beatInBar,band);
 }
 
 /* SWING (mid) & BURNING (high) drums. Densities/dynamics open with energy; in the
@@ -934,6 +933,26 @@ function bass2BeatTriplet(t,b){                             // 2-beat (quarter-n
     m=clamp(scaleStep(m,dir),26,46);
   }
   bassCur=m;
+}
+
+/* ================================================================
+   STYLES — selectable genre grooves (meter / tempo / feel / kit). Each
+   supplies its own per-beat drums+bass; setStyle() swaps the active one
+   and updates the meter/tempo/feel config. The original groove = 'Swing'.
+   ================================================================ */
+const STYLES = [
+  { name:'Swing', beatsPerBar:4, bpm:128, swing:0.62, grooveOffset:2,
+    drums:(t,b,band)=> band==='half' ? drumsHalfTime(t,b) : drumsSwing(t,b,band),
+    bass: scheduleBass },
+];
+let styleIdx=0, style=STYLES[0];
+function setStyle(i){
+  styleIdx=((i%STYLES.length)+STYLES.length)%STYLES.length; style=STYLES[styleIdx];
+  CONFIG.beatsPerBar = style.beatsPerBar;
+  CONFIG.swing       = style.swing;
+  CONFIG.grooveOffset= style.grooveOffset;
+  CONFIG.bpm         = style.bpm;
+  if(Transport.beatDur) Transport.beatDur = 60/style.bpm;   // live tempo (when already running)
 }
 
 /* ================================================================
