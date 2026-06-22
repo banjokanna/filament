@@ -161,6 +161,7 @@
 <div id="gear" title="Settings"></div>
 <div id="settings">
   <div class="srow"><span>HUD</span><span class="tog" id="tog-hud">OFF</span></div>
+  <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
   <div id="settingsClose" title="Close">✕</div>
 </div>
@@ -234,16 +235,13 @@ const CONFIG = {
   compProb: 0.55,         // chance of a comping stab per bar
 
   // ---- RightHand — the lead is "声" (a voice): sustained, gliding ----
+  // (per-voice tone — osc/filter/vibrato/attack/release/saturation/sends — lives in TIMBRES)
   leadLo: 38, leadHi: 96,       // playable midi range mapped to the vertical axis
-  leadAttack: 0.045,            // s — how fast a note speaks
-  leadRelease: 0.9,             // s — tail after the finger lifts
   leadMaxVoices: 6,             // cap on overlapping lead voices (rapid-tap tails) — steal oldest
                                 //    (lead is monophonic; normal play never reaches this — transparent)
   leadPortamento: 0.06,         // glide time-constant for slides (legato)
   leadLeapSemitones: 3,         // a jump of >= this, made fast, re-articulates…
   leadLeapSpeed: 0.30,          // px/ms — …above this finger speed (else it glides)
-  leadVibratoHz: 5.5,
-  leadVibratoMaxCents: 16,      // vibrato depth ceiling, opened by horizontal motion
   chordToneWeight: 2.0,         // snap bias toward chord tones (vs other scale notes)
   snapWaver: 0.5,               // tiny random humanisation in the snap choice
 
@@ -252,7 +250,6 @@ const CONFIG = {
   intensityWeights: { speed:0.5, height:0.4, pressure:0.3 },
   intensityAttack: 0.18,        // EMA rise
   intensityDecay: 0.06,         // EMA fall when released
-  leadSatBase: 1.0, leadSatMax: 2.4, // saturation drive grows with intensity (Rosenwinkel)
 
   // ---- right-hand FLICK — a deliberate fast flick plays a chromatic OUTSIDE figure ----
   rightFlick:{
@@ -317,6 +314,24 @@ const CONFIG = {
     burnFillProb: 0.45,         // burn: a short fill on the last beat of the bar
   },
 };
+
+/* ================================================================
+   VOICE TIMBRES — six lead tones evoking different jazz-guitar voices.
+   Each preset drives the lead synth: oscillator pair + chorus detune, the
+   saw/edge mix and low-pass range (mapped by finger X = darkness↔bite), filter
+   Q, vibrato, attack/release, saturation drive (base→max with intensity), and
+   the lead's own reverb/delay sends (1.0 = the original Rosenwinkel level).
+   These are impressions of each player's sound, not samples.
+   ================================================================ */
+const TIMBRES = [
+  // A — warm, a thin skin of saturation, hazy reverb (the original)
+  {name:'Tone A', o1:'triangle', o2:'sawtooth', det1:3,  det2:-4,  sawLo:0.03, sawHi:0.45, fltLo:650,  fltHi:4600, q:1.0, vibHz:5.5, vibCents:16, atk:0.045, rel:0.9, sat0:1.0, sat1:2.4, rev:1.0, dly:1.0, post:0.60},
+  // B — bright, round, lush chorus + long delay, very clean
+  {name:'Tone B', o1:'triangle', o2:'triangle', det1:9,  det2:-11, sawLo:0.04, sawHi:0.30, fltLo:1000, fltHi:5200, q:0.7, vibHz:4.5, vibCents:12, atk:0.05,  rel:1.0, sat0:0.8, sat1:1.5, rev:0.9, dly:1.5, post:0.80},
+  // C — liquid legato, wide chorus, smooth overdrive, long sustain (quieter still)
+  {name:'Tone C', o1:'sawtooth', o2:'triangle', det1:7,  det2:-9,  sawLo:0.06, sawHi:0.34, fltLo:800,  fltHi:4200, q:0.6, vibHz:5.0, vibCents:10, atk:0.06,  rel:1.6, sat0:1.2, sat1:2.2, rev:0.95, dly:0.6, post:0.35},
+];
+let timbreIdx=0, timbre=TIMBRES[0];
 
 /* ================================================================
    HARMONY DATA — pc = pitch classes (0 = C).
@@ -409,6 +424,7 @@ let fillAtBeat=-1;      // a drum fill is queued for this absolute beat (down-fl
 let AC=null, master, reverbSend, dryGain, delaySend;
 let bandDry=null, bandRev=null, noiseBuf=null;
 let leadInput=null, leadDrive=null;     // lead bus + its saturation drive node
+let leadPost=null, leadRevSend=null, leadDlySend=null;  // lead output + its own reverb/delay sends (per-timbre)
 let leadIntensity=0;                     // 0..1 — recomputed each frame, fed to BandBrain (phase 4)
 
 /* soft-clip curve — a thin skin of saturation, not fuzz */
@@ -467,10 +483,26 @@ function buildAudio(){
   // climbs with leadIntensity, so a fast, high line naturally pushes & growls
   leadInput = AC.createGain(); leadInput.gain.value=1;
   const shaper = AC.createWaveShaper(); shaper.curve=makeSatCurve(); shaper.oversample='2x';
-  leadDrive = AC.createGain(); leadDrive.gain.value=CONFIG.leadSatBase;
-  const leadPost = AC.createGain(); leadPost.gain.value=0.6;
+  leadDrive = AC.createGain(); leadDrive.gain.value=timbre.sat0;
+  leadPost = AC.createGain(); leadPost.gain.value=timbre.post;
   leadInput.connect(leadDrive); leadDrive.connect(shaper); shaper.connect(leadPost);
-  leadPost.connect(dryGain); leadPost.connect(reverbSend); leadPost.connect(delaySend);
+  leadPost.connect(dryGain);
+  // the lead's own reverb/delay sends, scaled per timbre (1.0 = the original Rosenwinkel level)
+  leadRevSend = AC.createGain(); leadRevSend.gain.value=timbre.rev; leadPost.connect(leadRevSend); leadRevSend.connect(reverbSend);
+  leadDlySend = AC.createGain(); leadDlySend.gain.value=timbre.dly; leadPost.connect(leadDlySend); leadDlySend.connect(delaySend);
+}
+/* switch the lead voice timbre — bus-level params (sat drive, reverb/delay sends, output)
+   apply immediately; per-voice traits (osc type, filter, vibrato) take effect on the next note. */
+function setTimbre(i){
+  timbreIdx=(i%TIMBRES.length+TIMBRES.length)%TIMBRES.length; timbre=TIMBRES[timbreIdx];
+  if(AC){
+    const t=AC.currentTime;
+    if(leadPost)    leadPost.gain.setTargetAtTime(timbre.post,t,0.08);
+    if(leadRevSend) leadRevSend.gain.setTargetAtTime(timbre.rev,t,0.08);
+    if(leadDlySend) leadDlySend.gain.setTargetAtTime(timbre.dly,t,0.08);
+    // sat base follows immediately; updateIntensity keeps lerping base→max from here
+    if(leadDrive)   leadDrive.gain.setTargetAtTime(timbre.sat0,t,0.08);
+  }
 }
 function noiseSrc(t,dur){
   const s=AC.createBufferSource(); s.buffer=noiseBuf; s.loop=true;
@@ -1067,18 +1099,18 @@ const yToMidi = y01 => CONFIG.leadHi - y01*(CONFIG.leadHi-CONFIG.leadLo);
    held while the finger is down, glided across the neck on slides */
 function createLeadVoice(midi,x01){
   const t=AC.currentTime, f=mtof(midi);
-  const o1=AC.createOscillator(); o1.type='triangle';
-  const o2=AC.createOscillator(); o2.type='sawtooth';
+  const o1=AC.createOscillator(); o1.type=timbre.o1;
+  const o2=AC.createOscillator(); o2.type=timbre.o2;
   o1.frequency.value=f; o2.frequency.value=f;
-  o1.detune.value=3; o2.detune.value=-4;
-  const g2=AC.createGain(); g2.gain.value=lerp(0.03,0.45,x01);   // edge from position
-  const flt=AC.createBiquadFilter(); flt.type='lowpass'; flt.Q.value=1.0;
-  flt.frequency.value=lerp(650,3800,x01);
+  o1.detune.value=timbre.det1; o2.detune.value=timbre.det2;
+  const g2=AC.createGain(); g2.gain.value=lerp(timbre.sawLo,timbre.sawHi,x01);   // edge from position
+  const flt=AC.createBiquadFilter(); flt.type='lowpass'; flt.Q.value=timbre.q;
+  flt.frequency.value=lerp(timbre.fltLo,timbre.fltHi,x01);
   const env=AC.createGain();
   env.gain.setValueAtTime(0.0001,t);
-  env.gain.exponentialRampToValueAtTime(0.22,t+CONFIG.leadAttack);
+  env.gain.exponentialRampToValueAtTime(0.22,t+timbre.atk);
   // vibrato — depth opened live by horizontal motion (see leadMove)
-  const lfo=AC.createOscillator(); lfo.type='sine'; lfo.frequency.value=CONFIG.leadVibratoHz;
+  const lfo=AC.createOscillator(); lfo.type='sine'; lfo.frequency.value=timbre.vibHz;
   const lfoGain=AC.createGain(); lfoGain.gain.value=0;
   lfo.connect(lfoGain); lfoGain.connect(o1.detune); lfoGain.connect(o2.detune);
   o1.connect(flt); o2.connect(g2); g2.connect(flt); flt.connect(env); env.connect(leadInput);
@@ -1120,7 +1152,7 @@ function rearticulateLead(v,midi,x01){              // a fresh attack for a deli
   v.env.gain.cancelScheduledValues(t);
   v.env.gain.setValueAtTime(Math.max(v.env.gain.value,0.0001),t);
   v.env.gain.exponentialRampToValueAtTime(0.05,t+0.02);
-  v.env.gain.exponentialRampToValueAtTime(0.22,t+0.02+CONFIG.leadAttack);
+  v.env.gain.exponentialRampToValueAtTime(0.22,t+0.02+timbre.atk);
   v.midi=midi;
 }
 function releaseLead(v){
@@ -1130,12 +1162,12 @@ function releaseLead(v){
   // a tap that lifts before the attack finishes would otherwise be pinned near
   // zero (silent) — so let a young voice bloom to a quick peak first: a plucked blip
   let bloom=0;
-  if((t-v.born)<CONFIG.leadAttack){
+  if((t-v.born)<timbre.atk){
     bloom=0.012;
     v.env.gain.exponentialRampToValueAtTime(0.22,t+bloom);
   }
-  v.env.gain.exponentialRampToValueAtTime(0.0001,t+bloom+CONFIG.leadRelease);
-  const end=t+bloom+CONFIG.leadRelease+0.1;
+  v.env.gain.exponentialRampToValueAtTime(0.0001,t+bloom+timbre.rel);
+  const end=t+bloom+timbre.rel+0.1;
   try{ v.o1.stop(end); v.o2.stop(end); v.lfo.stop(end); }catch(_){}  // may already be stolen
   v.stopAt=end;
 }
@@ -1198,9 +1230,9 @@ function leadMove(e){
   const t=AC.currentTime;
   const artic=clamp(lead.hSpeed*1.6,0,1);
   const bright=clamp(x01*0.8+artic*0.4,0,1);
-  lead.voice.g2.gain.setTargetAtTime(lerp(0.03,0.45,x01),t,0.05);     // saw edge ← position
-  lead.voice.flt.frequency.setTargetAtTime(lerp(650,4600,bright),t,0.05);
-  lead.voice.lfoGain.gain.setTargetAtTime(artic*CONFIG.leadVibratoMaxCents,t,0.08);
+  lead.voice.g2.gain.setTargetAtTime(lerp(timbre.sawLo,timbre.sawHi,x01),t,0.05);     // saw edge ← position
+  lead.voice.flt.frequency.setTargetAtTime(lerp(timbre.fltLo,timbre.fltHi,bright),t,0.05);
+  lead.voice.lfoGain.gain.setTargetAtTime(artic*timbre.vibCents,t,0.08);
 }
 function leadUp(e){
   if(lead.pid!==e.pointerId) return;
@@ -1225,7 +1257,7 @@ function updateIntensity(){
     leadIntensity += (0-leadIntensity)*CONFIG.intensityDecay;
   }
   if(leadDrive) leadDrive.gain.setTargetAtTime(
-    lerp(CONFIG.leadSatBase,CONFIG.leadSatMax,leadIntensity), AC.currentTime, 0.1);
+    lerp(timbre.sat0,timbre.sat1,leadIntensity), AC.currentTime, 0.1);
 
   // temperature gently returns home when the left hand isn't setting it, so the band
   // calms back to a resting energy instead of staying loud after a push
@@ -1824,9 +1856,13 @@ function closeSettings(){ settingsEl.classList.remove('open'); }
 document.getElementById('gear').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();openSettings();});
 document.getElementById('settingsClose').addEventListener('click',e=>{e.stopPropagation();closeSettings();});
 togHud.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=!CONFIG.debug; syncHud(); });
+// Voice timbre — a three-button A | B | C selector; applies live so you can audition
+const voiceOpts=[document.getElementById('voice-0'),document.getElementById('voice-1'),document.getElementById('voice-2')];
+function syncVoice(){ voiceOpts.forEach((el,i)=>el.classList.toggle('on', i===timbreIdx)); }
+voiceOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); setTimbre(i); syncVoice(); }));
 // tap the dim backdrop (outside the rows) to close
 settingsEl.addEventListener('pointerdown',e=>{ if(e.target===settingsEl) closeSettings(); });
-syncHud();   // initial state (language toggle is wired after the tutorial block, below)
+syncHud(); syncVoice();   // initial state (language toggle is wired after the tutorial block, below)
 
 /* ---------------- interactive tutorial ----------------
    Launched from the settings panel. A top card names a gesture and waits; the band
