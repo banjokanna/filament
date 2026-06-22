@@ -205,7 +205,7 @@
    CONFIG — every tunable lives here. No magic numbers in logic.
    ================================================================ */
 const CONFIG = {
-  debug: false,           // show the top-right gesture/state HUD (toggle in Settings)
+  debug: true,            // show the top-right gesture/state HUD (toggle in Settings)
 
   // ---- Transport ----
   bpm: 128,               // medium-up, Rosenwinkel-leaning
@@ -399,6 +399,8 @@ let pivotChord=null;    // transient V7 / tritone-sub / altered chord bridging i
 let selectorActive=false, selectorIndex=0;  // progression scrub selector (shown while scrubbing)
 let gaugeFrom=0, gaugeTo=0;  // transition gauge span in beats (commit → destination arrival)
 let gaugeWallStart=0, gaugeWallEnd=0;  // …same span in wall-clock ms, so the bar fills perfectly smoothly
+let fillGaugeStart=0, fillGaugeEnd=0;  // a down-flick fill's countdown bar (wall-clock ms) — fills toward the landing
+let fillManual=false;                  // the queued fill came from a down-flick (gets the countdown + landing accent)
 let fillAtBeat=-1;      // a drum fill is queued for this absolute beat (down-flick / progression change)
 
 /* ================================================================
@@ -994,7 +996,8 @@ const Transport = {
       // a queued fill fires once the scheduler reaches its beat (down-flick / progression change)
       if(fillAtBeat>=0 && b>=fillAtBeat){
         if(!suspended) drumFill(t,bandStrength());
-        fillAtBeat=-1;
+        if(!suspended) scheduleFillLanding(t);   // amber bloom synced to the audio — for BOTH the down-flick and the progression fill
+        fillAtBeat=-1; fillManual=false;
       }
       scheduleVisualPulse(t,beatInBar);
 
@@ -1451,6 +1454,7 @@ function commitProgression(i){
   gaugeWallStart=performance.now();                        // drive the bar off wall-clock (smooth, no beat-step)
   gaugeWallEnd=gaugeWallStart+(gaugeTo-P)*Transport.beatDur*1000;
   fillAtBeat=Math.round(gaugeTo)-1;                        // announce the change NOW: fill the beat before it lands
+  fillManual=false;                                        // this fill belongs to the harmony move (no amber accent)
   dbg('PROG → '+PROGRESSIONS[i].name);
 }
 function beatPos(){                                         // continuous beat position (for the transition gauge)
@@ -1472,8 +1476,11 @@ function fireFill(){
   const bpb=CONFIG.beatsPerBar;
   let last=Math.floor(Transport.beat/bpb)*bpb+(bpb-1);
   while(last<Transport.beat) last+=bpb;                    // ensure the scheduler hasn't passed it
-  fillAtBeat=last;
-  flash.kind='fill'; flash.a=lerp(0.14,0.28,bandStrength());
+  fillAtBeat=last; fillManual=true;
+  // No instant flash — a fill isn't a one-shot. Instead a countdown bar fills toward the
+  // landing, and a low amber bloom blooms the moment the fill actually sounds (see the tick).
+  fillGaugeStart=performance.now();
+  fillGaugeEnd=fillGaugeStart+Math.max(0,(fillAtBeat-beatPos()))*Transport.beatDur*1000;
   dbg('FLICK ▼ → FILL'); tutorialNotify('fill');
 }
 function firePunch(){
@@ -1604,6 +1611,12 @@ function scheduleVisualPulse(t,beatInBar){
     pulses.push({r:downbeat?40:24, a:downbeat?0.5:0.28, max:downbeat?Math.max(W,H)*0.5:Math.max(W,H)*0.28});
   },delay);
 }
+/* the down-flick fill's landing accent — a strong amber bloom fired at the exact audio
+   moment the fill sounds, so the visual lands WITH the music (not on the input). */
+function scheduleFillLanding(t){
+  const delay=Math.max(0,(t-AC.currentTime)*1000);
+  setTimeout(()=>{ pulses.push({r:46, a:0.5, max:Math.max(W,H)*0.72, amber:true}); },delay);
+}
 
 function frame(){
   const now=performance.now();
@@ -1629,10 +1642,14 @@ function frame(){
     const p=pulses[i];
     p.r+=(p.max-p.r)*0.05; p.a*=0.94;
     if(p.a<0.01){pulses.splice(i,1);continue;}
-    const col=lerp(255,180,bgTension)|0, blu=lerp(120,255,bgTension)|0;
     cx.beginPath();cx.arc(W/2,bloomY,p.r,0,7);
-    cx.strokeStyle=`rgba(${col},${lerp(200,212,bgTension)|0},${blu},${p.a})`;
-    cx.lineWidth=1.4;cx.stroke();
+    if(p.amber){                                         // the fill-landing accent — warm, gently brighter than a beat bloom
+      cx.strokeStyle=`rgba(255,201,143,${p.a})`; cx.lineWidth=1.8;
+    }else{
+      const col=lerp(255,180,bgTension)|0, blu=lerp(120,255,bgTension)|0;
+      cx.strokeStyle=`rgba(${col},${lerp(200,212,bgTension)|0},${blu},${p.a})`; cx.lineWidth=1.4;
+    }
+    cx.stroke();
   }
 
   // lead colour runs hotter (amber→near-red) as leadIntensity rises
@@ -1711,12 +1728,19 @@ function frame(){
     cx.fillStyle='rgba(232,213,163,0.55)'; cx.fillRect(0,H-4,W*g,4);
   }
 
-  // discrete event flash — warm for a HIT, amber for a FILL, pale cyan for a PUNCH
+  // fill countdown — a warm bar (just above the harmony gauge) filling toward the beat the
+  // down-flick fill lands on. It reaches the right edge exactly as the fill sounds.
+  if(fillManual && fillGaugeEnd>fillGaugeStart && now<fillGaugeEnd){
+    const g=clamp((now-fillGaugeStart)/(fillGaugeEnd-fillGaugeStart),0,1);
+    cx.fillStyle='rgba(255,190,120,0.6)'; cx.fillRect(0,H-9,W*g,3);
+  }
+
+  // discrete event flash — warm for a HIT, pale cyan for a PUNCH (a FILL has no flash; it
+  // uses the countdown bar + the amber landing bloom instead)
   if(flash.a>0.01){
     flash.a*=0.9;
-    cx.fillStyle = flash.kind==='hit'  ? `rgba(255,232,184,${flash.a})`   // warm lift (HIT)
-                 : flash.kind==='fill' ? `rgba(255,206,150,${flash.a})`   // amber lift (FILL)
-                 : `rgba(150,210,235,${flash.a})`;                        // pale cyan (tap PUNCH)
+    cx.fillStyle = flash.kind==='hit' ? `rgba(255,232,184,${flash.a})`   // warm lift (HIT)
+                 : `rgba(150,210,235,${flash.a})`;                       // pale cyan (tap PUNCH)
     cx.fillRect(0,0,W,H);
   }
 
