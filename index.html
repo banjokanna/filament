@@ -1664,7 +1664,9 @@ function commitProgression(i){
   const span=CONFIG.chordChangeEveryBars*CONFIG.beatsPerBar, P=beatPos();
   const pivotBeat=Math.ceil((P+0.001)/span)*span;          // next boundary = pivot starts
   const arrival=pivotBeat+span;                             // when the destination chord lands (band)
-  const lagBeats=(style.leadLagBars||0)*CONFIG.beatsPerBar; // extra delay until the player perceives it
+  // match the full leadChord lag from applyChord: grooveOffset + leadLagBars
+  const lagBeats=(CONFIG.beatsPerBar-CONFIG.grooveOffset)%CONFIG.beatsPerBar
+               +(style.leadLagBars||0)*CONFIG.beatsPerBar;
   gaugeFrom=P; gaugeTo=arrival+lagBeats;                    // gauge fills to the PERCEIVED change
   gaugeWallStart=performance.now();                        // drive the bar off wall-clock (smooth, no beat-step)
   gaugeWallEnd=gaugeWallStart+(gaugeTo-P)*Transport.beatDur*1000;
@@ -1940,9 +1942,10 @@ function frame(){
   // transition gauge — ONE fill from the commit until the dominant ends (the moment the
   // destination progression arrives). Driven by wall-clock (now) so it fills perfectly smoothly,
   // instead of stepping with the beat scheduler.
-  if((pendingProg!==null || pivotChord) && gaugeWallEnd>gaugeWallStart){
+  if(gaugeWallEnd>gaugeWallStart){
     const g=clamp((now-gaugeWallStart)/(gaugeWallEnd-gaugeWallStart),0,1);
     cx.fillStyle='rgba(232,213,163,0.55)'; cx.fillRect(0,H-4,W*g,4);
+    if(g>=1) gaugeWallStart=gaugeWallEnd=0;
   }
 
   // fill countdown — a warm bar (just above the harmony gauge) filling toward the beat the
