@@ -45,6 +45,16 @@
     transition:background .3s,box-shadow .3s,transform .3s;
   }
   #gear:hover::after{background:rgba(232,213,163,.9);box-shadow:0 0 14px rgba(255,179,92,.6);transform:scale(1.15);}
+  #gear.rec::after{
+    background:rgba(255,60,60,.95);box-shadow:0 0 12px rgba(255,40,40,.7);
+    animation:recPulse 1s ease-in-out infinite;
+  }
+  #rec-label{
+    position:fixed;right:36px;bottom:calc(6px + env(safe-area-inset-bottom));z-index:7;
+    height:40px;line-height:40px;
+    font-size:9px;letter-spacing:.12em;color:rgba(255,80,80,.9);
+    display:none;pointer-events:none;
+  }
   #settings{
     position:fixed;inset:0;z-index:9;display:none;
     flex-direction:column;align-items:center;justify-content:center;gap:26px;
@@ -76,6 +86,8 @@
   .srow .seg .opt+.opt{border-left:1px solid rgba(232,213,163,.3);}
   .srow .seg .opt.on{color:var(--ink);background:var(--gold);}
   .srow .tog:focus{outline:none;}
+  .srow .seg .opt.off{color:rgba(232,213,163,.2);pointer-events:none;}
+  @keyframes recPulse{0%,100%{opacity:1}50%{opacity:.4}}
 
   /* ---------- interactive tutorial — a top card; the canvas stays playable beneath it ---------- */
   #tutorial{
@@ -154,8 +166,10 @@
   <div class="srow"><span>Style</span><span class="seg" id="style-seg"><span class="opt on" id="style-0">Sw</span><span class="opt" id="style-1">Bb</span><span class="opt" id="style-2">Bo</span><span class="opt" id="style-3">Wz</span></span></div>
   <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
+  <div class="srow"><span>Rec</span><span class="seg"><span class="opt" id="rec-btn">● REC</span><span class="opt off" id="rec-wav">WAV</span><span class="opt off" id="rec-mid">MIDI</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
 </div>
+<span id="rec-label">REC</span>
 
 <div id="tutorial">
   <div class="card">
@@ -198,6 +212,7 @@
    ================================================================ */
 const CONFIG = {
   debug: true,            // show the top-right gesture/state HUD (toggle in Settings)
+  recMaxSeconds: 600,     // max recording duration (10 min) — auto-stop beyond this
 
   // ---- Transport ----
   bpm: 128,               // medium-up, Rosenwinkel-leaning
@@ -506,6 +521,190 @@ function noiseSrc(t,dur){
 function gc(src,...nodes){ src.onended=()=>nodes.forEach(n=>{try{n.disconnect();}catch(_){}}); }
 
 /* ================================================================
+   RECORDING — WAV (wet voice) + MIDI (all tracks).
+   Taps the master bus (all tracks) for WAV capture.
+   MIDI events are logged from each instrument's scheduler.
+   ================================================================ */
+const REC={state:'idle',startTime:0,samples:[],sampleCount:0,midi:[],leadBase:null};
+let recProc=null;
+
+function buildRecChain(){
+  // tap master (pre-compressor) → ScriptProcessor → silent output
+  recProc=AC.createScriptProcessor(4096,2,2);
+  master.connect(recProc);
+  const silence=AC.createGain(); silence.gain.value=0;
+  recProc.connect(silence); silence.connect(AC.destination);
+  recProc.onaudioprocess=function(e){
+    if(REC.state!=='recording') return;
+    const L=e.inputBuffer.getChannelData(0), R=e.inputBuffer.getChannelData(1);
+    const buf=new Float32Array(L.length*2);
+    for(let i=0;i<L.length;i++){buf[i*2]=L[i];buf[i*2+1]=R[i];}
+    REC.samples.push(buf); REC.sampleCount+=L.length;
+    if(REC.sampleCount/AC.sampleRate>=CONFIG.recMaxSeconds) stopRecording();
+  };
+}
+
+// ---- MIDI event logger (ch 0-indexed, vel 0..1 → 0..127) ----
+function midiLog(ch,type,d1,d2,when){
+  if(REC.state!=='recording') return;
+  const t=(when||AC.currentTime)-REC.startTime;
+  if(t<0) return;
+  REC.midi.push({t,ch,type,d1,d2:d2|0});
+}
+const GM_KICK=36,GM_SNARE=38,GM_HAT=42,GM_RIDE=51,GM_CRASH=49,GM_RIMCLICK=37;
+function gmTom(freq){return freq>=165?48:freq>=135?47:freq>=108?45:43;}
+
+// ---- WAV encoder (stereo 16-bit PCM) ----
+function encodeWAV(chunks,sampleRate){
+  const total=chunks.reduce((s,c)=>s+c.length,0);
+  const buf=new ArrayBuffer(44+total*2); // 16-bit = 2 bytes per sample
+  const v=new DataView(buf);
+  const writeStr=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
+  const nCh=2, bps=16;
+  writeStr(0,'RIFF'); v.setUint32(4,36+total*2,true); writeStr(8,'WAVE');
+  writeStr(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true);
+  v.setUint16(22,nCh,true); v.setUint32(24,sampleRate,true);
+  v.setUint32(28,sampleRate*nCh*bps/8,true); v.setUint16(32,nCh*bps/8,true);
+  v.setUint16(34,bps,true); writeStr(36,'data'); v.setUint32(40,total*2,true);
+  let off=44;
+  for(const chunk of chunks){
+    for(let i=0;i<chunk.length;i++){
+      const s=Math.max(-1,Math.min(1,chunk[i]));
+      v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true); off+=2;
+    }
+  }
+  return new Blob([buf],{type:'audio/wav'});
+}
+
+// ---- MIDI file encoder (SMF format 1) ----
+function vlq(v){const bytes=[];bytes.push(v&0x7F);while(v>>=7){bytes.push((v&0x7F)|0x80);}return bytes.reverse();}
+function midiStr(s){const a=[];for(let i=0;i<s.length;i++)a.push(s.charCodeAt(i));return a;}
+function midiU16(v){return[(v>>8)&0xFF,v&0xFF];}
+function midiU32(v){return[(v>>24)&0xFF,(v>>16)&0xFF,(v>>8)&0xFF,v&0xFF];}
+
+function encodeMIDI(events,bpm,ppq){
+  ppq=ppq||480;
+  const usPerQ=Math.round(60000000/bpm);
+  // sort events by time
+  const sorted=[...events].sort((a,b)=>a.t-b.t||a.type-b.type);
+  // group by channel
+  const chans=new Map();
+  sorted.forEach(e=>{if(!chans.has(e.ch))chans.set(e.ch,[]);chans.get(e.ch).push(e);});
+  const trackNames={0:'Voice',1:'Bass',2:'Comping',9:'Drums'};
+  const programs={0:26,1:32,2:0}; // 26=jazz guitar, 32=acoustic bass, 0=piano
+  function buildTrack(ch,evts){
+    const d=[];
+    // track name
+    const name=midiStr(trackNames[ch]||('Ch'+(ch+1)));
+    d.push(...vlq(0),0xFF,0x03,name.length,...name);
+    // tempo (only on first track)
+    if(ch===0) d.push(...vlq(0),0xFF,0x51,0x03,(usPerQ>>16)&0xFF,(usPerQ>>8)&0xFF,usPerQ&0xFF);
+    // program change (not for drums)
+    if(ch!==9 && programs[ch]!==undefined) d.push(...vlq(0),0xC0|ch,programs[ch]);
+    // pitch bend range ±12 semitones for voice track (RPN 0,0 = bend range)
+    if(ch===0){
+      d.push(...vlq(0),0xB0|ch,101,0);  // RPN MSB
+      d.push(...vlq(0),0xB0|ch,100,0);  // RPN LSB
+      d.push(...vlq(0),0xB0|ch,6,12);   // data entry MSB = 12 semitones
+      d.push(...vlq(0),0xB0|ch,38,0);   // data entry LSB = 0 cents
+      d.push(...vlq(0),0xB0|ch,101,127); // de-select RPN
+      d.push(...vlq(0),0xB0|ch,100,127);
+    }
+    // events
+    let lastTick=0;
+    evts.forEach(e=>{
+      const tick=Math.round(e.t*bpm/60*ppq);
+      const delta=Math.max(0,tick-lastTick); lastTick=tick;
+      if(e.type===0x90) d.push(...vlq(delta),0x90|ch,e.d1&0x7F,e.d2&0x7F);
+      else if(e.type===0x80) d.push(...vlq(delta),0x80|ch,e.d1&0x7F,0);
+      else if(e.type===0xE0) d.push(...vlq(delta),0xE0|ch,e.d1&0x7F,e.d2&0x7F); // pitch bend
+    });
+    // end of track
+    d.push(...vlq(0),0xFF,0x2F,0x00);
+    return d;
+  }
+  const tracks=[];
+  [0,1,2,9].forEach(ch=>{if(chans.has(ch))tracks.push(buildTrack(ch,chans.get(ch)));});
+  if(tracks.length===0) tracks.push(buildTrack(0,[])); // at least one track
+  // header
+  const h=[...midiStr('MThd'),...midiU32(6),...midiU16(1),...midiU16(tracks.length),...midiU16(ppq)];
+  const out=[...h];
+  tracks.forEach(td=>{out.push(...midiStr('MTrk'),...midiU32(td.length),...td);});
+  return new Blob([new Uint8Array(out)],{type:'audio/midi'});
+}
+
+// ---- recording flow ----
+let recCountdownEnd=0, recCountdownWallStart=0, recCountdownWallEnd=0;
+const recLabel=document.getElementById('rec-label');
+const recBtn=document.getElementById('rec-btn');
+const recWav=document.getElementById('rec-wav');
+const recMid=document.getElementById('rec-mid');
+const gearEl=document.getElementById('gear');
+
+function recTimecode(){
+  const d=new Date(), p=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
+}
+
+function startRecCountdown(){
+  if(!AC) return;
+  if(!recProc) buildRecChain();
+  REC.samples=[]; REC.sampleCount=0; REC.midi=[]; REC.leadBase=null;
+  REC.state='countdown';
+  recWav.classList.add('off'); recMid.classList.add('off');
+  // countdown: 2 bars from the next perceived downbeat (shifted by grooveOffset)
+  const bpb=CONFIG.beatsPerBar, P=beatPos();
+  const off=CONFIG.grooveOffset%bpb;
+  const nextFelt=Math.ceil((P-off+0.001)/bpb)*bpb+off;
+  const startBeat=nextFelt+bpb*2;
+  recCountdownEnd=startBeat;
+  const beatsAway=startBeat-P;
+  recCountdownWallStart=performance.now();
+  recCountdownWallEnd=recCountdownWallStart+beatsAway*Transport.beatDur*1000;
+  recBtn.textContent='···';
+  syncRecUI();
+}
+
+function startRecording(){
+  REC.state='recording';
+  REC.startTime=AC.currentTime;
+  recBtn.textContent='STOP';
+  gearEl.classList.add('rec'); recLabel.style.display='block';
+  syncRecUI();
+}
+
+function stopRecording(){
+  if(REC.state==='countdown'){REC.state='idle';recBtn.textContent='● REC';syncRecUI();return;}
+  if(REC.state!=='recording') return;
+  if(REC.leadBase!==null){midiLog(0,0xE0,0,64);midiLog(0,0x80,REC.leadBase,0);REC.leadBase=null;}
+  REC.state='stopped';
+  recBtn.textContent='● REC';
+  gearEl.classList.remove('rec'); recLabel.style.display='none';
+  recWav.classList.remove('off'); recMid.classList.remove('off');
+  syncRecUI();
+}
+
+function dlBlob(blob,name){
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;
+  document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},3000);
+}
+function downloadWAV(){
+  if(REC.state!=='stopped'||REC.sampleCount===0) return;
+  dlBlob(encodeWAV(REC.samples,AC.sampleRate),'vc-mix-'+recTimecode()+'.wav');
+}
+function downloadMIDI(){
+  if(REC.state!=='stopped'||REC.midi.length===0) return;
+  dlBlob(encodeMIDI(REC.midi,CONFIG.bpm),'vc-all-'+recTimecode()+'.mid');
+}
+
+function syncRecUI(){
+  const isRec=REC.state==='recording';
+  const isCd=REC.state==='countdown';
+  recBtn.classList.toggle('on',isRec||isCd);
+}
+
+/* ================================================================
    HARMONY ENGINE — current chord + available notes, advanced by the
    Transport on bar lines (no wall-clock timers — boundary quantized).
    ================================================================ */
@@ -554,6 +753,8 @@ function playPad(c, when){
     flt.connect(env); env.connect(dryGain); env.connect(reverbSend);
     o1.start(t); o2.start(t);
     padVoices.push({env,oscs:[o1,o2]});
+    midiLog(2,0x90,m,50,t);                      // pad: soft velocity, long sustain
+    midiLog(2,0x80,m,0,t+4.0);
   });
 }
 
@@ -610,6 +811,7 @@ let bassCur=36;
 let bassBusyBeat=0;   // a multi-beat bass figure (2-beat triplet) occupies beats until here
 
 function ride(t,vel,legato=0){
+  midiLog(9,0x90,GM_RIDE,Math.round(clamp(vel,0,1)*127),t);
   // brushes on the ride: a soft dark wash, no hard stick attack.
   // legato (0..1, from BandBrain) lengthens the wash as the band heats up
   const s=noiseSrc(t,0.8);
@@ -633,6 +835,7 @@ function ride(t,vel,legato=0){
   }
 }
 function hat(t,vel){
+  midiLog(9,0x90,GM_HAT,Math.round(clamp(vel,0,1)*127),t);
   const s=noiseSrc(t,0.1);
   const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=6200;
   const lp=AC.createBiquadFilter();lp.type='lowpass';lp.frequency.value=10000;
@@ -644,6 +847,7 @@ function hat(t,vel){
   gc(s,s,hp,lp,env);
 }
 function snare(t,vel){
+  midiLog(9,0x90,GM_SNARE,Math.round(clamp(vel,0,1)*127),t);
   const s=noiseSrc(t,0.15);
   const bp=AC.createBiquadFilter();bp.type='bandpass';bp.frequency.value=1900;bp.Q.value=0.9;
   const env=AC.createGain();
@@ -660,6 +864,7 @@ function snare(t,vel){
   gc(s,s,bp,env,o,te);
 }
 function crash(t,vel){
+  midiLog(9,0x90,GM_CRASH,Math.round(clamp(vel,0,1)*127),t);
   // a wide bright cymbal wash — used for the up-flick band HIT
   const s=noiseSrc(t,1.4);
   const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=2600;
@@ -671,6 +876,7 @@ function crash(t,vel){
   gc(s,s,hp,env);
 }
 function tom(t,vel,freq){
+  midiLog(9,0x90,gmTom(freq),Math.round(clamp(vel,0,1)*127),t);
   // a fat tom — pitch dropping sine with a little skin-noise body. Used for the
   // drop fill (ドロップ), where the cymbals fall away and the toms take over.
   const o=AC.createOscillator();o.type='sine';
@@ -692,6 +898,7 @@ function tom(t,vel,freq){
   gc(o,o,env,s,lp,ne);
 }
 function kick(t,vel){
+  midiLog(9,0x90,GM_KICK,Math.round(clamp(vel,0,1)*127),t);
   const o=AC.createOscillator();o.type='sine';
   o.frequency.setValueAtTime(92,t);
   o.frequency.exponentialRampToValueAtTime(46,t+0.08);
@@ -703,6 +910,7 @@ function kick(t,vel){
   gc(o,o,env);
 }
 function rimClick(t,vel){
+  midiLog(9,0x90,GM_RIMCLICK,Math.round(clamp(vel,0,1)*127),t);
   // cross-stick: a dry woody click — snare shell tone without the rattle
   const o=AC.createOscillator();o.type='triangle';
   o.frequency.setValueAtTime(1800,t);
@@ -722,6 +930,8 @@ function rimClick(t,vel){
   gc(o,o,env,s,bp,ne);
 }
 function bassPluck(t,midi,vel,dur){
+  midiLog(1,0x90,midi,Math.round(clamp(vel,0,1)*127),t);
+  midiLog(1,0x80,midi,0,t+dur*0.95);
   const f=mtof(midi);
   const o1=AC.createOscillator();o1.type='sine';o1.frequency.value=f;
   const o2=AC.createOscillator();o2.type='triangle';o2.frequency.value=f;o2.detune.value=3;
@@ -748,7 +958,9 @@ function bassPluck(t,midi,vel,dur){
 function comp(c,t,vel){
   const notes=c.voicing.slice(2);                         // skip the bass-register tones
   notes.forEach((m,i)=>{
-    const tt=t+i*0.014;                                   // a gentle roll
+    const tt=t+i*0.014;
+    midiLog(2,0x90,m,Math.round(clamp(vel,0,1)*90),tt);
+    midiLog(2,0x80,m,0,tt+0.85);                          // a gentle roll
     const f=mtof(m);
     const o1=AC.createOscillator();o1.type='triangle';o1.frequency.value=f;
     const o2=AC.createOscillator();o2.type='sawtooth';o2.frequency.value=f;o2.detune.value=-4;
@@ -1356,6 +1568,10 @@ function leadDown(e){
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
   const midi=snapToAvailable(yToMidi(y01));
   lead.voice=createLeadVoice(midi,x01); lastLeadMidi=midi;
+  if(REC.leadBase!==null) midiLog(0,0x80,REC.leadBase,0);
+  REC.leadBase=midi;
+  midiLog(0,0xE0,0,64);
+  midiLog(0,0x90,midi,100);
   breakTrail(); pushTrail(e.clientX,e.clientY);
   ripple(x01,y01,midi);
 }
@@ -1389,11 +1605,31 @@ function leadMove(e){
   const midi=snapToAvailable(yToMidi(y01));
   lastLeadMidi=midi;
   if(midi!==lead.voice.midi){
-    tutorialNotify('voice');                                // moving the pitch IS the voice lesson
-    // a wide, fast jump speaks anew; everything else slides (legato)
+    tutorialNotify('voice');
     const leap=Math.abs(midi-lead.voice.midi)>=CONFIG.leadLeapSemitones && lead.speed>=CONFIG.leadLeapSpeed;
-    if(leap){ rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi); }
-    else glideLeadTo(lead.voice,midi);
+    if(leap){
+      // MIDI: rearticulate at ripple points (deliberate attack)
+      if(REC.leadBase!==null) midiLog(0,0x80,REC.leadBase,0);
+      midiLog(0,0xE0,0,64);
+      REC.leadBase=midi;
+      midiLog(0,0x90,midi,100);
+      rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi);
+    } else {
+      // MIDI: legato glide — pitch bend using snapped note (reflects chord tone attraction)
+      if(REC.leadBase!==null){
+        const semi=midi-REC.leadBase;
+        if(Math.abs(semi)>11){
+          midiLog(0,0x80,REC.leadBase,0);
+          midiLog(0,0xE0,0,64);
+          REC.leadBase=midi;
+          midiLog(0,0x90,midi,100);
+        } else {
+          const bend=8192+Math.round(semi*(8192/12));
+          midiLog(0,0xE0,bend&0x7F,(bend>>7)&0x7F);
+        }
+      }
+      glideLeadTo(lead.voice,midi);
+    }
   }
   // timbre follows horizontal POSITION (left = round/dark, right = bright/edgy),
   // so a slide carries the same left↔right expression as a tap. Horizontal SPEED
@@ -1407,6 +1643,7 @@ function leadMove(e){
 }
 function leadUp(e){
   if(lead.pid!==e.pointerId) return;
+  if(REC.leadBase!==null){midiLog(0,0xE0,0,64);midiLog(0,0x80,REC.leadBase,0);REC.leadBase=null;}
   if(lead.voice) releaseLead(lead.voice);
   lead.voice=null; lead.pid=null; lead.speed=0; lead.hSpeed=0;
 }
@@ -1945,6 +2182,13 @@ function frame(){
     cx.fillStyle='rgba(255,190,120,0.6)'; cx.fillRect(0,H-9,W*g,3);
   }
 
+  // recording countdown bar (red, bottom of screen)
+  if(REC.state==='countdown' && recCountdownWallEnd>recCountdownWallStart){
+    const g=clamp((now-recCountdownWallStart)/(recCountdownWallEnd-recCountdownWallStart),0,1);
+    cx.fillStyle='rgba(255,60,60,0.7)'; cx.fillRect(0,H-4,W*g,4);
+    if(g>=1) startRecording();
+  }
+
   // discrete event flash — warm for a HIT, pale cyan for a PUNCH (a FILL has no flash; it
   // uses the countdown bar + the amber landing bloom instead)
   if(flash.a>0.01){
@@ -2034,7 +2278,7 @@ function syncHud(){
 function settingsOpen(){ return settingsEl.classList.contains('open'); }
 function openSettings(){
   if(tutActive) endTutorial();
-  syncHud(); settingsEl.classList.add('open');
+  syncHud(); syncRec(); settingsEl.classList.add('open');
 }
 function closeSettings(){ settingsEl.classList.remove('open'); }
 document.getElementById('gear').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();openSettings();});
@@ -2067,6 +2311,21 @@ function switchStyle(i){
   }, dur*1000);
 }
 styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); switchStyle(i); syncStyle(); }));
+// Rec buttons — REC starts countdown (or stops), Save downloads WAV+MIDI
+recBtn.addEventListener('click',e=>{
+  e.stopPropagation();
+  if(REC.state==='recording'||REC.state==='countdown'){ stopRecording(); return; }
+  startRecCountdown(); closeSettings();
+});
+recWav.addEventListener('click',e=>{ e.stopPropagation(); downloadWAV(); });
+recMid.addEventListener('click',e=>{ e.stopPropagation(); downloadMIDI(); });
+// sync rec button label when opening settings
+function syncRec(){
+  recBtn.textContent = REC.state==='recording'?'STOP':(REC.state==='countdown'?'···':'● REC');
+  recBtn.classList.toggle('on', REC.state==='recording'||REC.state==='countdown');
+  recWav.classList.toggle('off', REC.state!=='stopped');
+  recMid.classList.toggle('off', REC.state!=='stopped');
+}
 syncHud(); syncVoice(); syncStyle();   // initial state (language toggle is wired after the tutorial block, below)
 
 /* ---------------- interactive tutorial ----------------
