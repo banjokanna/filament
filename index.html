@@ -833,20 +833,12 @@ function playPad(c, when){
   });
 }
 
-/* piano chord — same voicing, fast percussive attack with hammer-like decay */
-function playPiano(c, when){
+/* piano stab — a single chord hit with controllable velocity and duration */
+function pianoStab(c, when, vel, dur){
   const t0 = when ?? AC.currentTime;
-  // sustain length: cover the full chord-change span so the sound never dies early
-  const chordDur = CONFIG.chordChangeEveryBars * CONFIG.beatsPerBar * (Transport.beatDur || 60/CONFIG.bpm);
-  padVoices.forEach(v=>{
-    v.env.gain.cancelScheduledValues(t0);
-    v.env.gain.setValueAtTime(v.env.gain.value,t0);
-    v.env.gain.exponentialRampToValueAtTime(0.0001,t0+0.3);
-    v.oscs.forEach(o=>o.stop(t0+0.4));
-  });
-  padVoices=[];
-  c.voicing.forEach((m,i)=>{
-    const t = t0 + i*(0.05+Math.random()*0.02);
+  const notes = vel > 0.5 ? c.voicing : c.voicing.slice(1);  // lighter hits drop the bass note
+  notes.forEach((m,i)=>{
+    const t = t0 + i*(0.008+Math.random()*0.006);
     const f = mtof(m);
     const o1=AC.createOscillator(), o2=AC.createOscillator(), o3=AC.createOscillator();
     o1.type='sine'; o2.type='sine'; o3.type='sine';
@@ -855,29 +847,112 @@ function playPiano(c, when){
     const g2=AC.createGain(); g2.gain.value=0.3;
     const g3=AC.createGain(); g3.gain.value=0.08;
     const flt=AC.createBiquadFilter(); flt.type='lowpass';
-    flt.frequency.setValueAtTime(4000,t);
-    flt.frequency.exponentialRampToValueAtTime(1200,t+chordDur*0.4);
+    flt.frequency.setValueAtTime(2400+1600*vel,t);
+    flt.frequency.exponentialRampToValueAtTime(800+400*vel,t+dur*0.4);
     flt.Q.value=0.7;
     const env=AC.createGain();
+    const pk=0.06*vel;
     env.gain.setValueAtTime(0.0001,t);
-    env.gain.linearRampToValueAtTime(0.06,t+0.008);
-    env.gain.exponentialRampToValueAtTime(0.035,t+0.12);
-    env.gain.exponentialRampToValueAtTime(0.008,t+chordDur*0.5);
-    env.gain.exponentialRampToValueAtTime(0.002,t+chordDur*0.85);
-    env.gain.exponentialRampToValueAtTime(0.0001,t+chordDur);
+    env.gain.linearRampToValueAtTime(pk,t+0.008);
+    env.gain.exponentialRampToValueAtTime(pk*0.6,t+0.1);
+    env.gain.exponentialRampToValueAtTime(pk*0.12,t+dur*0.7);
+    env.gain.exponentialRampToValueAtTime(0.0001,t+dur);
     o1.connect(flt); o2.connect(g2); g2.connect(flt); o3.connect(g3); g3.connect(flt);
     flt.connect(env); env.connect(dryGain); env.connect(reverbSend);
     o1.start(t); o2.start(t); o3.start(t);
-    o1.stop(t+chordDur+1); o2.stop(t+chordDur+1); o3.stop(t+chordDur+1);
-    padVoices.push({env,oscs:[o1,o2,o3]});
-    midiLog(2,0x90,m,70,t);
-    midiLog(2,0x80,m,0,t+3.5);
+    o1.stop(t+dur+0.1); o2.stop(t+dur+0.1); o3.stop(t+dur+0.1);
+    gc(o1,o1,o2,o3,g2,flt,env);
+    midiLog(2,0x90,m,Math.round(vel*90),t);
+    midiLog(2,0x80,m,0,t+dur*0.9);
   });
+}
+
+/* piano comping — called from scheduleBeat when chordTone==='piano'.
+   Each style gets its own rhythmic vocabulary with enough variation
+   to never sound like a fixed loop. */
+function pianoComp(t, beatInBar){
+  if(suspended) return;
+  const BEAT=Transport.beatDur, off=BEAT*CONFIG.swing;
+  const j=()=>t+rand(-0.008,0.008);
+  const E=BandBrain.effDrive, P=BandBrain.parts;
+  const density=clamp(0.3+0.7*P.comp, 0, 1);
+  const sn=style.name;
+
+  if(sn==='Swing'){
+    // swing comping: beat 1 anchors the bar, syncopated stabs fill around it
+    if(beatInBar===0 && Math.random()<0.55+0.3*density)
+      pianoStab(chord, j(), rand(0.6,0.85), BEAT*rand(0.8,1.5));
+    // & of 1 — classic anticipation
+    if(beatInBar===0 && Math.random()<0.4*density)
+      pianoStab(chord, t+off+rand(-0.008,0.008), rand(0.5,0.75), BEAT*rand(0.6,1.2));
+    // beat 2 — strong spot
+    if(beatInBar===1 && Math.random()<0.45*density)
+      pianoStab(chord, j(), rand(0.55,0.8), BEAT*rand(0.7,1.4));
+    // & of 3 — the Charleston push
+    if(beatInBar===2 && Math.random()<0.55*density)
+      pianoStab(chord, t+off+rand(-0.008,0.008), rand(0.6,0.85), BEAT*rand(0.5,1.0));
+    // beat 4 — set up next bar
+    if(beatInBar===3 && Math.random()<0.3*density)
+      pianoStab(chord, j(), rand(0.45,0.7), BEAT*rand(0.5,0.9));
+    // & of 4 — anticipation into downbeat
+    if(beatInBar===3 && Math.random()<0.4*density)
+      pianoStab(chord, t+off+rand(-0.008,0.008), rand(0.55,0.75), BEAT*rand(0.6,1.0));
+  }
+  else if(sn==='Bebop'){
+    // bebop: quick stabs, sparse but pointed, lots of space
+    if(beatInBar===0 && Math.random()<0.25*density)
+      pianoStab(chord, j(), rand(0.5,0.7), BEAT*rand(0.4,0.7));
+    if(beatInBar===1 && Math.random()<0.35*density)
+      pianoStab(chord, t+off+rand(-0.006,0.006), rand(0.5,0.7), BEAT*rand(0.3,0.6));
+    if(beatInBar===2 && Math.random()<0.3*density)
+      pianoStab(chord, j(), rand(0.45,0.65), BEAT*rand(0.4,0.7));
+    if(beatInBar===3 && Math.random()<0.4*density)
+      pianoStab(chord, t+off+rand(-0.006,0.006), rand(0.55,0.75), BEAT*rand(0.3,0.5));
+  }
+  else if(sn==='Bossa'){
+    // bossa: João Gilberto-style syncopation — most hits on offbeats (&)
+    // two-bar cell alternates for variety: A = 1, 2&, 4&   B = 1&, 3&, 4
+    const half = BEAT*0.5;
+    const cell = (Transport.bar||0) % 2;
+    if(cell===0){
+      // cell A: downbeat on 1, then offbeats
+      if(beatInBar===0)
+        pianoStab(chord, j(), rand(0.6,0.8), BEAT*rand(1.2,1.8));
+      if(beatInBar===1 && Math.random()<0.85*density)
+        pianoStab(chord, t+half+rand(-0.005,0.005), rand(0.5,0.7), BEAT*rand(0.8,1.2));
+      if(beatInBar===3 && Math.random()<0.8*density)
+        pianoStab(chord, t+half+rand(-0.005,0.005), rand(0.45,0.65), BEAT*rand(0.6,1.0));
+    } else {
+      // cell B: offbeat on 1&, then syncopated
+      if(beatInBar===0 && Math.random()<0.85*density)
+        pianoStab(chord, t+half+rand(-0.005,0.005), rand(0.5,0.7), BEAT*rand(0.8,1.4));
+      if(beatInBar===2 && Math.random()<0.8*density)
+        pianoStab(chord, t+half+rand(-0.005,0.005), rand(0.45,0.65), BEAT*rand(0.6,1.0));
+      if(beatInBar===3 && Math.random()<0.5*density)
+        pianoStab(chord, j(), rand(0.4,0.6), BEAT*rand(0.5,0.8));
+    }
+  }
+  else if(sn==='Waltz'){
+    // waltz: chord on 1, sometimes 3 or & of 2
+    if(beatInBar===0)
+      pianoStab(chord, j(), rand(0.6,0.85), BEAT*rand(1.2,2.0));
+    if(beatInBar===1 && Math.random()<0.4*density)
+      pianoStab(chord, t+off+rand(-0.006,0.006), rand(0.4,0.6), BEAT*rand(0.5,0.9));
+    if(beatInBar===2 && Math.random()<0.45*density)
+      pianoStab(chord, j(), rand(0.45,0.65), BEAT*rand(0.6,1.0));
+  }
+}
+
+/* whole-note piano chord — used only for Pad mode (playPad).
+   When Piano mode is active, pianoComp handles all voicing from scheduleBeat. */
+function playPiano(c, when){
+  pianoStab(c, when, 0.75, CONFIG.chordChangeEveryBars * CONFIG.beatsPerBar * (Transport.beatDur || 60/CONFIG.bpm));
 }
 
 let chordTone='pad';
 function playChordVoicing(c, when){
-  if(chordTone==='piano') playPiano(c, when); else playPad(c, when);
+  if(chordTone==='piano') return;  // pianoComp handles voicing beat-by-beat from scheduleBeat
+  playPad(c, when);
 }
 
 function applyChord(c, when){              // set ANY chord (progression chord or a transient pivot)
@@ -1137,6 +1212,7 @@ function scheduleBeat(t,beatInBar){
   const band = E<G.halfTimeBelow ? 'half' : (E>G.burningAbove ? 'burn' : 'swing');
   style.drums(t,beatInBar,band);                            // the active genre supplies the kit/pattern
   style.bass(t,beatInBar,band);
+  if(chordTone==='piano') pianoComp(t,beatInBar);
 }
 
 /* SWING (mid) & BURNING (high) drums. Densities/dynamics open with energy; in the
@@ -1148,13 +1224,15 @@ function drumsSwing(t,b,band){
   const more=v=>clamp(v*(0.2+1.8*E),0,1);
   const acc=lerp(0.72,1.18,P.accent);
 
-  if(Math.random()<0.97) ride(j(),(backbeat?0.9:0.66)*acc,P.legato);
+  if(Math.random()<0.97) ride(j(),(backbeat?0.9: b===0?0.8:0.66)*acc,P.legato);
   const skip = backbeat ? CONFIG.rideSkipProb*lerp(0.4,1,E) : lerp(0,0.7,E);
   if(Math.random()<skip) ride(t+off+rand(-0.006,0.006),0.45*acc,P.legato);
-  if(backbeat) hat(j(),acc);
+  { const hv = b===0 ? 1.0 : b===2 ? 0.85 : 0.65;       // beat 1 strongest, 3 medium, 2&4 softer
+    if(backbeat) hat(j(), hv*acc); }
   if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22)*acc);
   if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6)*acc);
-  if(b===0&&Math.random()<CONFIG.featherKickProb*lerp(0.7,1.4,E)) kick(j(),0.16);
+  if(b===0) kick(j(),lerp(0.2,0.3,E));                                        // beat 1 kick — always present
+  if(b===0 && Math.random()<0.08) crash(j(),rand(0.12,0.2));                  // occasional soft crash on 1
   if(b===2&&Math.random()<lerp(0,0.35,E)) kick(j(),0.18);
   if(Math.random()<more(CONFIG.kickPushProb)) kick(t+off,rand(0.22,0.36));
 
@@ -1176,9 +1254,9 @@ function drumsHalfTime(t,b){
   const j=()=>t+rand(-0.006,0.006);
   const acc=lerp(0.55,0.85,BandBrain.parts.accent);
   const back=(b===1||b===3);                                     // beats 2 & 4
-  if(back){ ride(j(),0.6*acc,0.85); hat(j(),0.55*acc); }         // cymbals on 2 & 4
+  if(back){ ride(j(),0.6*acc,0.85); hat(j(),(b===1?0.55:0.4)*acc); } // beat 2 stronger hat than beat 4
   if(b===2) snare(j(),0.5*acc);                                  // soft half-time backbeat on 3
-  if(b===0 && Math.random()<0.55) kick(j(),0.18);               // soft kick on 1
+  if(b===0) kick(j(),0.22);                                      // beat 1 kick — always present
   if(Math.random()<0.04) snare(t+Transport.beatDur*CONFIG.swing,0.12); // a rare brushed ghost
 }
 
@@ -1191,15 +1269,17 @@ function drumsBebop(t,b,band){
 
   if(band==='half'){
     if(b===0||b===2) ride(j(),0.45*acc,0.9);
-    if(backbeat) hat(j(),0.35*acc);
+    if(backbeat) hat(j(),(b===1?0.35:0.25)*acc);                   // beat 2 hat stronger than beat 4
     if(b===0 && Math.random()<0.35) kick(j(),0.1);
     return;
   }
   ride(j(),(backbeat?0.85:0.6)*acc,P.legato);
   if(Math.random()<lerp(0.5,0.85,E)) ride(t+off+rand(-0.004,0.004),0.4*acc,P.legato);
-  if(backbeat) hat(j(),0.55*acc);
+  { const hv = b===1 ? 0.55 : 0.4;                                // beat 2 hat stronger than beat 4
+    if(backbeat) hat(j(), hv*acc); }
   if(Math.random()<lerp(0.04,0.15,E)) snare(t+(Math.random()<0.5?0:off),rand(0.3,0.55)*acc);
-  if(b===0 && Math.random()<0.4) kick(j(),0.12);
+  if(b===0) kick(j(),0.16);
+  if(b===0 && Math.random()<0.06) crash(j(),rand(0.1,0.18));                  // occasional soft crash on 1
 
   if(band==='burn'){
     const r=clamp((E-CONFIG.groove.burningAbove)/(1-CONFIG.groove.burningAbove),0,1);
@@ -1216,13 +1296,15 @@ function drumsBossa(t,b,band){
 
   if(band==='half'){
     if(b===1||b===3) rimClick(j(),0.45*acc);
-    if(b===0 && Math.random()<0.3) kick(j(),0.1);
+    if(b===0) kick(j(),0.15);
     return;
   }
-  hat(j(),0.3*acc);
-  if(Math.random()<0.85) hat(t+BEAT*0.5+rand(-0.003,0.003),0.22*acc);
+  { const hv = b===0 ? 0.38 : b===2 ? 0.32 : 0.25;               // beat 1 strongest, 3 medium, 2&4 softer
+    hat(j(), hv*acc); }
+  if(Math.random()<0.85) hat(t+BEAT*0.5+rand(-0.003,0.003),0.18*acc);  // &'s always softer
   if(b===1||b===3) rimClick(j(),0.7*acc);
-  if(b===0) kick(j(),0.2);
+  if(b===0) kick(j(),0.25);
+  if(b===0 && Math.random()<0.07) crash(j(),rand(0.1,0.16));                  // occasional soft crash on 1
   if(b===1 && Math.random()<0.7) kick(t+BEAT*0.5+rand(-0.003,0.003),0.18);
   if(Math.random()<0.08) snare(t+BEAT*0.5,rand(0.08,0.15)*acc);
 
@@ -1350,16 +1432,18 @@ function drumsWaltz(t,b,band){
 
   if(band==='half'){
     if(b===0) ride(j(),0.5*acc,0.9);
-    if(b===2 && Math.random()<0.5) hat(j(),0.3*acc);
-    if(b===0 && Math.random()<0.4) kick(j(),0.12);
+    if(b===2 && Math.random()<0.5) hat(j(),0.22*acc);              // softer in half-time
+    if(b===0) kick(j(),0.16);
     return;
   }
   // jazz waltz ride: 1 · 2& · 3
   ride(j(),(b===0?0.75:0.55)*acc,P.legato);
   if(b===1 && Math.random()<lerp(0.6,0.9,E)) ride(t+off+rand(-0.005,0.005),0.4*acc,P.legato);
-  if(b===1) hat(j(),0.28*acc);
+  if(b===1) hat(j(),0.28*acc);                                   // beat 2 hat
+  if(b===2) hat(j(),0.2*acc);                                    // beat 3 hat — softer
   if(b!==0 && Math.random()<lerp(0.03,0.10,E)) snare(t+off,rand(0.06,0.14)*acc);
-  if(b===0 && Math.random()<0.5) kick(j(),0.16);
+  if(b===0) kick(j(),0.2);
+  if(b===0 && Math.random()<0.07) crash(j(),rand(0.1,0.16));                  // occasional soft crash on 1
   if(b===2 && Math.random()<lerp(0,0.25,E)) kick(j(),0.14);
 
   if(band==='burn'){
@@ -1589,7 +1673,8 @@ const Transport = {
     }
 
     // breathing comping stab near the top of the bar (denser as comp energy rises)
-    if(bandPlaying() && Math.random()<clamp(CONFIG.compProb*(0.5+1.0*BandBrain.parts.comp),0,1))
+    // skip when Piano chord tone is active — the piano voicing covers the harmonic role
+    if(chordTone!=='piano' && bandPlaying() && Math.random()<clamp(CONFIG.compProb*(0.5+1.0*BandBrain.parts.comp),0,1))
       comp(chord,t+rand(0,0.02),rand(0.7,1));
   },
 
@@ -2470,7 +2555,11 @@ styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); 
 const chordPadBtn=document.getElementById('chord-pad'), chordPianoBtn=document.getElementById('chord-piano');
 function syncChord(){ chordPadBtn.classList.toggle('on',chordTone==='pad'); chordPianoBtn.classList.toggle('on',chordTone==='piano'); }
 chordPadBtn.addEventListener('click',e=>{ e.stopPropagation(); chordTone='pad'; syncChord(); });
-chordPianoBtn.addEventListener('click',e=>{ e.stopPropagation(); chordTone='piano'; syncChord(); });
+chordPianoBtn.addEventListener('click',e=>{
+  e.stopPropagation(); chordTone='piano'; syncChord();
+  padVoices.forEach(v=>{ v.oscs.forEach(o=>{try{o.stop();}catch(_){}}); });
+  padVoices=[];
+});
 // Rec buttons — REC starts countdown (or stops), Save downloads WAV+MIDI
 recBtn.addEventListener('click',e=>{
   e.stopPropagation();
