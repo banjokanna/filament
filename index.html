@@ -45,9 +45,12 @@
     transition:background .3s,box-shadow .3s,transform .3s;
   }
   #gear:hover::after{background:rgba(232,213,163,.9);box-shadow:0 0 14px rgba(255,179,92,.6);transform:scale(1.15);}
+  #gear.rec-blink::after{
+    background:rgba(255,60,60,.95);box-shadow:0 0 12px rgba(255,40,40,.7);
+    animation:recPulse .5s ease-in-out infinite;
+  }
   #gear.rec::after{
     background:rgba(255,60,60,.95);box-shadow:0 0 12px rgba(255,40,40,.7);
-    animation:recPulse 1s ease-in-out infinite;
   }
   #rec-label{
     position:fixed;right:36px;bottom:calc(6px + env(safe-area-inset-bottom));z-index:7;
@@ -634,7 +637,6 @@ function encodeMIDI(events,bpm,ppq){
 }
 
 // ---- recording flow ----
-let recCountdownEnd=0, recCountdownWallStart=0, recCountdownWallEnd=0;
 const recLabel=document.getElementById('rec-label');
 const recBtn=document.getElementById('rec-btn');
 const recWav=document.getElementById('rec-wav');
@@ -646,35 +648,105 @@ function recTimecode(){
   return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'-'+p(d.getHours())+p(d.getMinutes());
 }
 
-function startRecCountdown(){
+function stickClick(t){
+  // dry stick click routed directly to destination (audible even when master is down)
+  const o=AC.createOscillator();o.type='triangle';
+  o.frequency.setValueAtTime(1800,t);
+  o.frequency.exponentialRampToValueAtTime(1200,t+0.015);
+  const env=AC.createGain();
+  env.gain.setValueAtTime(0.0001,t);
+  env.gain.exponentialRampToValueAtTime(0.22,t+0.001);
+  env.gain.exponentialRampToValueAtTime(0.0001,t+0.05);
+  o.connect(env);env.connect(AC.destination);o.start(t);o.stop(t+0.07);
+  const s=noiseSrc(t,0.03);
+  const bp=AC.createBiquadFilter();bp.type='bandpass';bp.frequency.value=4000;bp.Q.value=3;
+  const ne=AC.createGain();
+  ne.gain.setValueAtTime(0.0001,t);
+  ne.gain.exponentialRampToValueAtTime(0.10,t+0.001);
+  ne.gain.exponentialRampToValueAtTime(0.0001,t+0.03);
+  s.connect(bp);bp.connect(ne);ne.connect(AC.destination);
+  gc(o,o,env,s,bp,ne);
+}
+
+function initiateRecording(){
   if(!AC) return;
   if(!recProc) buildRecChain();
   REC.samples=[]; REC.sampleCount=0; REC.midi=[]; REC.leadBase=null;
   REC.state='countdown';
   recWav.classList.add('off'); recMid.classList.add('off');
-  // countdown: 2 bars from the next perceived downbeat (shifted by grooveOffset)
-  const bpb=CONFIG.beatsPerBar, P=beatPos();
-  const off=CONFIG.grooveOffset%bpb;
-  const nextFelt=Math.ceil((P-off+0.001)/bpb)*bpb+off;
-  const startBeat=nextFelt+bpb*2;
-  recCountdownEnd=startBeat;
-  const beatsAway=startBeat-P;
-  recCountdownWallStart=performance.now();
-  recCountdownWallEnd=recCountdownWallStart+beatsAway*Transport.beatDur*1000;
   recBtn.textContent='···';
   syncRecUI();
-}
-
-function startRecording(){
-  REC.state='recording';
-  REC.startTime=AC.currentTime;
-  recBtn.textContent='STOP';
-  gearEl.classList.add('rec'); recLabel.style.display='block';
-  syncRecUI();
+  // fade out over 0.8s, then pause, then count-in, then start
+  const fadeDur=0.8;
+  const t=AC.currentTime;
+  master.gain.setTargetAtTime(0, t, fadeDur/4);
+  setTimeout(()=>{
+    // stop transport and silence everything
+    Transport.stop();
+    padVoices.forEach(v=>{ v.oscs.forEach(o=>{try{o.stop();}catch(_){}}); });
+    padVoices=[];
+    if(lead.voice){ try{releaseLead(lead.voice);}catch(_){} lead.voice=null; lead.pid=null; }
+    suspended=false; temperature=0.44; leadIntensity=0;
+    chordIdx=0;
+    // stick count-in immediately after fade
+    {
+      const bpb=CONFIG.beatsPerBar;
+      const beatDur=60/CONFIG.bpm;
+      const off=CONFIG.grooveOffset;
+      // 1-bar stick count delayed by grooveOffset beats — the count
+      // starts late so it straddles the music start (landing on the
+      // felt downbeat, e.g. Swing: 2 beats silence, 4 clicks, last 2
+      // overlap with the already-running first bar)
+      const delayBeats=off;
+      const t0=AC.currentTime+0.08+delayBeats*beatDur;
+      for(let i=0;i<bpb;i++) stickClick(t0+i*beatDur);
+      // flash gear dot on each click (also delayed)
+      let flashIdx=0;
+      const flashOn=()=>{ gearEl.classList.add('rec-blink'); };
+      const flashOff=()=>{ gearEl.classList.remove('rec-blink'); };
+      const flashDelay=delayBeats*beatDur*1000;
+      setTimeout(()=>{
+        if(REC.state!=='countdown'&&REC.state!=='recording') return;
+        flashOn();
+        setTimeout(flashOff, Math.min(beatDur*400, 120));
+        flashIdx++;
+        const flashTimer=setInterval(()=>{
+          if(flashIdx>=bpb){ clearInterval(flashTimer); flashOff(); return; }
+          flashOn();
+          setTimeout(flashOff, Math.min(beatDur*400, 120));
+          flashIdx++;
+        }, beatDur*1000);
+      }, flashDelay);
+      // recording + music starts after 1 bar (before the count finishes
+      // when grooveOffset>0 — the remaining clicks overlap the music)
+      const countInDur=(bpb*beatDur)*1000;
+      setTimeout(()=>{
+        if(REC.state!=='countdown') return;
+        master.gain.cancelScheduledValues(AC.currentTime);
+        master.gain.setValueAtTime(CONFIG.masterGain, AC.currentTime);
+        // start recording BEFORE setChord so the initial pad's midiLog calls are captured
+        const tRec=AC.currentTime+0.06;
+        REC.state='recording';
+        REC.startTime=tRec;
+        setChord(0, tRec);
+        Transport.start();
+        recBtn.textContent='STOP';
+        gearEl.classList.remove('rec-blink');
+        gearEl.classList.add('rec'); recLabel.style.display='block';
+        syncRecUI();
+      }, countInDur);
+    }
+  }, fadeDur*1000);
 }
 
 function stopRecording(){
-  if(REC.state==='countdown'){REC.state='idle';recBtn.textContent='● REC';syncRecUI();return;}
+  if(REC.state==='countdown'){
+    REC.state='idle'; recBtn.textContent='● REC';
+    gearEl.classList.remove('rec-blink');
+    master.gain.cancelScheduledValues(AC.currentTime);
+    master.gain.setValueAtTime(CONFIG.masterGain, AC.currentTime);
+    syncRecUI(); return;
+  }
   if(REC.state!=='recording') return;
   if(REC.leadBase!==null){midiLog(0,0xE0,0,64);midiLog(0,0x80,REC.leadBase,0);REC.leadBase=null;}
   REC.state='stopped';
@@ -2182,12 +2254,7 @@ function frame(){
     cx.fillStyle='rgba(255,190,120,0.6)'; cx.fillRect(0,H-9,W*g,3);
   }
 
-  // recording countdown bar (red, bottom of screen)
-  if(REC.state==='countdown' && recCountdownWallEnd>recCountdownWallStart){
-    const g=clamp((now-recCountdownWallStart)/(recCountdownWallEnd-recCountdownWallStart),0,1);
-    cx.fillStyle='rgba(255,60,60,0.7)'; cx.fillRect(0,H-4,W*g,4);
-    if(g>=1) startRecording();
-  }
+  // (recording countdown bar removed — gear dot blink handles countdown feedback)
 
   // discrete event flash — warm for a HIT, pale cyan for a PUNCH (a FILL has no flash; it
   // uses the countdown bar + the amber landing bloom instead)
@@ -2315,7 +2382,7 @@ styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); 
 recBtn.addEventListener('click',e=>{
   e.stopPropagation();
   if(REC.state==='recording'||REC.state==='countdown'){ stopRecording(); return; }
-  startRecCountdown(); closeSettings();
+  initiateRecording(); closeSettings();
 });
 recWav.addEventListener('click',e=>{ e.stopPropagation(); downloadWAV(); });
 recMid.addEventListener('click',e=>{ e.stopPropagation(); downloadMIDI(); });
