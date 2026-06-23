@@ -169,6 +169,7 @@
   <div class="srow"><span>Style</span><span class="seg" id="style-seg"><span class="opt on" id="style-0">Sw</span><span class="opt" id="style-1">Bb</span><span class="opt" id="style-2">Bo</span><span class="opt" id="style-3">Wz</span></span></div>
   <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
+  <div class="srow"><span>Chord</span><span class="seg"><span class="opt on" id="chord-pad">Pad</span><span class="opt" id="chord-piano">Piano</span></span></div>
   <div class="srow"><span>Rec</span><span class="seg"><span class="opt" id="rec-btn">● REC</span><span class="opt off" id="rec-wav">WAV</span><span class="opt off" id="rec-mid">MIDI</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
 </div>
@@ -220,7 +221,7 @@ const CONFIG = {
   // ---- Transport ----
   bpm: 128,               // medium-up, Rosenwinkel-leaning
   beatsPerBar: 4,
-  grooveOffset: 2,        // shift the GROOVE (drums/bass/beat-bloom + the down-flick fill) this many
+  grooveOffset: 0,        // (disabled — pad attack is now fast enough that no beat shift is needed)
                           //    beats relative to the harmony, so the felt downbeat moves to where the
                           //    slow chord swell peaks. 0 = old behaviour. (perceived-"1" alignment)
   barsPerPhrase: 4,       // harmony / section boundary granularity
@@ -233,6 +234,7 @@ const CONFIG = {
   // ---- Harmony ----
   startProgression: 0,    // 0 = Floating
   chordChangeEveryBars: 2,// advance the chord every N bars (quantized to bar line)
+  padLeadBeats: 2,        // how many beats BEFORE the chord change the pad starts sounding
   pivotAffinityBias: 0.5, // per shared note: how much affinity biases the (otherwise random) pivot pick
 
   // ---- RhythmSection (phase-1 fixed densities; BandBrain overrides in phase 4) ----
@@ -729,6 +731,7 @@ function initiateRecording(){
         REC.state='recording';
         REC.startTime=tRec;
         setChord(0, tRec);
+        playChordVoicing(CHORDS[0], tRec);
         Transport.start();
         recBtn.textContent='STOP';
         gearEl.classList.remove('rec-blink');
@@ -830,8 +833,55 @@ function playPad(c, when){
   });
 }
 
+/* piano chord — same voicing, fast percussive attack with hammer-like decay */
+function playPiano(c, when){
+  const t0 = when ?? AC.currentTime;
+  // sustain length: cover the full chord-change span so the sound never dies early
+  const chordDur = CONFIG.chordChangeEveryBars * CONFIG.beatsPerBar * (Transport.beatDur || 60/CONFIG.bpm);
+  padVoices.forEach(v=>{
+    v.env.gain.cancelScheduledValues(t0);
+    v.env.gain.setValueAtTime(v.env.gain.value,t0);
+    v.env.gain.exponentialRampToValueAtTime(0.0001,t0+0.3);
+    v.oscs.forEach(o=>o.stop(t0+0.4));
+  });
+  padVoices=[];
+  c.voicing.forEach((m,i)=>{
+    const t = t0 + i*(0.05+Math.random()*0.02);
+    const f = mtof(m);
+    const o1=AC.createOscillator(), o2=AC.createOscillator(), o3=AC.createOscillator();
+    o1.type='sine'; o2.type='sine'; o3.type='sine';
+    o1.frequency.value=f; o2.frequency.value=f*2; o3.frequency.value=f*3;
+    o1.detune.value=Math.random()*2-1;
+    const g2=AC.createGain(); g2.gain.value=0.3;
+    const g3=AC.createGain(); g3.gain.value=0.08;
+    const flt=AC.createBiquadFilter(); flt.type='lowpass';
+    flt.frequency.setValueAtTime(4000,t);
+    flt.frequency.exponentialRampToValueAtTime(1200,t+chordDur*0.4);
+    flt.Q.value=0.7;
+    const env=AC.createGain();
+    env.gain.setValueAtTime(0.0001,t);
+    env.gain.linearRampToValueAtTime(0.06,t+0.008);
+    env.gain.exponentialRampToValueAtTime(0.035,t+0.12);
+    env.gain.exponentialRampToValueAtTime(0.008,t+chordDur*0.5);
+    env.gain.exponentialRampToValueAtTime(0.002,t+chordDur*0.85);
+    env.gain.exponentialRampToValueAtTime(0.0001,t+chordDur);
+    o1.connect(flt); o2.connect(g2); g2.connect(flt); o3.connect(g3); g3.connect(flt);
+    flt.connect(env); env.connect(dryGain); env.connect(reverbSend);
+    o1.start(t); o2.start(t); o3.start(t);
+    o1.stop(t+chordDur+1); o2.stop(t+chordDur+1); o3.stop(t+chordDur+1);
+    padVoices.push({env,oscs:[o1,o2,o3]});
+    midiLog(2,0x90,m,70,t);
+    midiLog(2,0x80,m,0,t+3.5);
+  });
+}
+
+let chordTone='pad';
+function playChordVoicing(c, when){
+  if(chordTone==='piano') playPiano(c, when); else playPad(c, when);
+}
+
 function applyChord(c, when){              // set ANY chord (progression chord or a transient pivot)
-  chord=c; bgTensionTarget=c.tension; playPad(c, when);
+  chord=c; bgTensionTarget=c.tension;
   // the right hand adopts the new chord grooveOffset beats later (on the felt downbeat)
   const t0 = when ?? AC.currentTime;
   const beat = Transport.beatDur || 0;
@@ -1354,16 +1404,16 @@ function scheduleBossaBass(t,b,band){
    and updates the meter/tempo/feel config. The original groove = 'Swing'.
    ================================================================ */
 const STYLES = [
-  { name:'Swing', beatsPerBar:4, bpm:128, swing:0.62, grooveOffset:2, leadLagBars:0,
+  { name:'Swing', beatsPerBar:4, bpm:128, swing:0.62, grooveOffset:0, leadLagBars:0, padLeadBeats:0,
     drums:(t,b,band)=> band==='half' ? drumsHalfTime(t,b) : drumsSwing(t,b,band),
     bass: scheduleBass },
-  { name:'Bebop', beatsPerBar:4, bpm:210, swing:0.58, grooveOffset:3, leadLagBars:1,
+  { name:'Bebop', beatsPerBar:4, bpm:210, swing:0.58, grooveOffset:0, leadLagBars:0, padLeadBeats:0,
     drums: drumsBebop,
     bass: scheduleBass },
-  { name:'Bossa', beatsPerBar:4, bpm:140, swing:0.50, grooveOffset:2, leadLagBars:0,
+  { name:'Bossa', beatsPerBar:4, bpm:140, swing:0.50, grooveOffset:0, leadLagBars:0, padLeadBeats:0,
     drums: drumsBossa,
     bass: scheduleBossaBass },
-  { name:'Waltz', beatsPerBar:3, bpm:150, swing:0.60, grooveOffset:0, leadLagBars:1,
+  { name:'Waltz', beatsPerBar:3, bpm:150, swing:0.60, grooveOffset:0, leadLagBars:0, padLeadBeats:0,
     drums: drumsWaltz,
     bass: scheduleWaltzBass },
 ];
@@ -1479,6 +1529,27 @@ const Transport = {
       const gBeat=(b+CONFIG.grooveOffset)%CONFIG.beatsPerBar;  // groove grid — the felt downbeat
 
       if(beatInBar===0) this.onBar(t,bar);             // harmony unchanged (the chord still changes here)
+
+      // pad pre-fire: start the slow pad swell padLeadBeats before the chord change
+      const plb=style.padLeadBeats||0;
+      if(plb>0){
+        const nextBar=bar+1;
+        const beatsLeft=CONFIG.beatsPerBar-beatInBar;    // beats until next bar boundary
+        if(beatsLeft===plb && nextBar>0 && nextBar%CONFIG.chordChangeEveryBars===0){
+          // peek at the upcoming chord
+          let upcoming=null;
+          if(pendingProg!==null && !pivotChord){
+            const destRoot=PROGRESSIONS[pendingProg].chords[0].tones[0];
+            upcoming=chooseDominant(destRoot);
+          }else if(pendingProg!==null && pivotChord){
+            upcoming=PROGRESSIONS[pendingProg].chords[0];
+          }else{
+            upcoming=CHORDS[(chordIdx+1)%CHORDS.length];
+          }
+          if(upcoming) playChordVoicing(upcoming, t);
+        }
+      }
+
       this.onBeat(t,gBeat,bar);                        // drums + bass follow the shifted groove
       // a queued fill fires once the scheduler reaches its beat (down-flick / progression change)
       if(fillAtBeat>=0 && b>=fillAtBeat){
@@ -1504,13 +1575,16 @@ const Transport = {
         const destRoot=PROGRESSIONS[pendingProg].chords[0].tones[0];
         pivotChord=chooseDominant(destRoot);               // dominant most akin to the current key
         applyChord(pivotChord,t);
+        if(!(style.padLeadBeats>0)) playChordVoicing(pivotChord,t);
         // (the announcing fill was already queued at commit time — see commitProgression)
       }else if(pendingProg!==null && pivotChord){
         // step 2: resolve into the destination progression
         progIdx=pendingProg; CHORDS=PROGRESSIONS[progIdx].chords;
         pendingProg=null; pivotChord=null; chordIdx=0; setChord(0,t);
+        if(!(style.padLeadBeats>0)) playChordVoicing(CHORDS[0],t);
       }else{
         advanceChord(t);                                 // ordinary chord drift
+        if(!(style.padLeadBeats>0)) playChordVoicing(chord,t);
       }
     }
 
@@ -2295,7 +2369,7 @@ function start(){
   // starting the scheduler against a still-suspended clock (currentTime stuck at 0) was what
   // sometimes left the band silent until a second tap. We wait for the resume, with a fallback.
   let begun=false;
-  const begin=()=>{ if(begun) return; begun=true; setChord(0, AC.currentTime+0.06); Transport.start(); };
+  const begin=()=>{ if(begun) return; begun=true; const t0=AC.currentTime+0.06; setChord(0,t0); playChordVoicing(CHORDS[0],t0); Transport.start(); };
   if(AC.state==='running') begin();
   else { AC.resume().then(begin).catch(begin); setTimeout(begin,300); }   // fallback if resume never settles
   // keep the audio alive: if the context is ever interrupted/suspended (tab switch, iOS audio
@@ -2364,20 +2438,39 @@ function switchStyle(i){
   if(i===styleIdx) return;
   if(!AC) { setStyle(i); syncStyle(); return; }
   styleIdx=i; syncStyle();
-  const dur=0.9;
-  master.gain.setTargetAtTime(0, AC.currentTime, dur/4);
+  const fadeOut=0.8, gap=0.4, fadeIn=0.6;
+  master.gain.setTargetAtTime(0, AC.currentTime, fadeOut/4);
   setTimeout(()=>{
+    // ensure silence before switching
+    master.gain.cancelScheduledValues(AC.currentTime);
+    master.gain.setValueAtTime(0, AC.currentTime);
+    // stop old voices
+    Transport.stop();
+    padVoices.forEach(v=>{ v.oscs.forEach(o=>{try{o.stop();}catch(_){}}); });
+    padVoices=[];
+    if(lead.voice){ try{releaseLead(lead.voice);}catch(_){} lead.voice=null; lead.pid=null; }
     setStyle(i);
-    Transport.beat=0; Transport.nextBeatTime=AC.currentTime+0.08;
-    bassBusyBeat=0; fillAtBeat=-1; fillManual=false;
-    pendingProg=null; pivotChord=null; gaugeFrom=0; gaugeTo=0;
-    bassCur=lowNear(chord.tones[0],36);
-    BandBrain.reset();
-    if(bandDry) bandDry.gain.setValueAtTime(lerp(0.62,1.12,BandBrain.effDrive),AC.currentTime);
-    master.gain.setTargetAtTime(CONFIG.masterGain, AC.currentTime, dur/4);
-  }, dur*1000);
+    setTimeout(()=>{
+      Transport.beat=0; Transport.nextBeatTime=AC.currentTime+0.08;
+      bassBusyBeat=0; fillAtBeat=-1; fillManual=false;
+      pendingProg=null; pivotChord=null; gaugeFrom=0; gaugeTo=0;
+      chordIdx=0;
+      setChord(0, AC.currentTime+0.06);
+      playChordVoicing(CHORDS[0], AC.currentTime+0.06);
+      bassCur=lowNear(chord.tones[0],36);
+      BandBrain.reset();
+      if(bandDry) bandDry.gain.setValueAtTime(lerp(0.62,1.12,BandBrain.effDrive),AC.currentTime);
+      master.gain.setTargetAtTime(CONFIG.masterGain, AC.currentTime, fadeIn/4);
+      Transport.start();
+    }, gap*1000);
+  }, fadeOut*1000);
 }
 styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); switchStyle(i); syncStyle(); }));
+// Chord tone selector (Pad / Piano)
+const chordPadBtn=document.getElementById('chord-pad'), chordPianoBtn=document.getElementById('chord-piano');
+function syncChord(){ chordPadBtn.classList.toggle('on',chordTone==='pad'); chordPianoBtn.classList.toggle('on',chordTone==='piano'); }
+chordPadBtn.addEventListener('click',e=>{ e.stopPropagation(); chordTone='pad'; syncChord(); });
+chordPianoBtn.addEventListener('click',e=>{ e.stopPropagation(); chordTone='piano'; syncChord(); });
 // Rec buttons — REC starts countdown (or stops), Save downloads WAV+MIDI
 recBtn.addEventListener('click',e=>{
   e.stopPropagation();
@@ -2393,7 +2486,7 @@ function syncRec(){
   recWav.classList.toggle('off', REC.state!=='stopped');
   recMid.classList.toggle('off', REC.state!=='stopped');
 }
-syncHud(); syncVoice(); syncStyle();   // initial state (language toggle is wired after the tutorial block, below)
+syncHud(); syncVoice(); syncStyle(); syncChord();   // initial state
 
 /* ---------------- interactive tutorial ----------------
    Launched from the settings panel. A top card names a gesture and waits; the band
