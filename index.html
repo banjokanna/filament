@@ -261,9 +261,14 @@ const CONFIG = {
 
   // ---- leadIntensity — finger speed + register (+ pressure), 0..1 → BandBrain ----
   intensitySpeedRef: 1.2,       // px/ms that maps to full speed-intensity
-  intensityWeights: { speed:0.5, height:0.4, pressure:0.3 },
+  intensityWeights: { speed:0.3, height:0.4, pressure:0.3, activity:0.35 },
   intensityAttack: 0.18,        // EMA rise
   intensityDecay: 0.06,         // EMA fall when released
+
+  // ---- outness — left-hand vertical swipe morphs the available note set ----
+  outMaxShift: 2,               // semitones at full outness — 1=side slip, 2=whole step
+  outDomBoost: 1.5,             // dominant chords: multiply shift by this (same gesture → more outside)
+  outDomTensionThresh: 0.75,    // chord.tension above this is treated as dominant (gets boost)
 
   // ---- right-hand FLICK — a deliberate fast flick plays a chromatic OUTSIDE figure ----
   rightFlick:{
@@ -290,7 +295,7 @@ const CONFIG = {
     zoneW: 0.14,           // gesture area: left this fraction of the width (room off the screen edge)…
     zoneTop: 0.50,         // …and below this fraction of the height (bottom-left)
     AXIS_RATIO: 1.3,       // how decisively vertical-vs-horizontal a stroke must be
-    TEMP_SENSITIVITY: 3.75,// screen-fraction dragged → temperature delta (~2 drags = full range)
+    TEMP_SENSITIVITY: 5.5, // screen-fraction dragged → outness delta (higher = less travel needed)
     FLICK_VEL: 1.2,        // px/ms peak speed at or above which a stroke is a flick…
     FLICK_MAX_MS: 360,     // …only if the whole contact was this brief…
     FLICK_MIN_DISP: 30,    // …and travelled at least this far vertically (px)…
@@ -305,8 +310,8 @@ const CONFIG = {
 
   // ---- BandBrain — reaction / interpretation / deviation (decided each bar) ----
   bandBrain:{
-    tempWeight: 0.80,     // how much the temperature dial drives band energy
-    leadWeight: 0.70,     // how much the soloist's own intensity drives it (reaction)
+    tempFromLead: 2.2,    // leadIntensity → temperature multiplier (compensates ^1.5 power curve)
+    leadWeight: 0.70,     // (legacy, unused by temperature — kept for reference)
     restTemp: 0.44,       // temperature drifts home to this when the left hand is idle
                           //    (→ band rests at ~0.35, not stuck loud after a push)
     tempReturn: 0.0025,   // per-frame ease of that drift home (lower = slower return to rest)
@@ -431,7 +436,8 @@ const midiName  = m=>NOTE_NAMES[((m%12)+12)%12]+(Math.floor(m/12)-1);   // 60 �
    leadIntensity (declared with the audio engine) is the fourth. The
    BandBrain (phase 4) will read all of these; for now they drive the band
    directly so the left hand is testable. */
-let temperature=0.44;   // left-hand vertical swipe — band heat 0..1 (rests here when idle)
+let temperature=0;      // band heat 0..1 — now purely derived from leadIntensity
+let outness=0;          // left-hand vertical swipe — note-set morph -1..+1 (0=inside, +=sharp, -=flat)
 let suspended=false;    // left-hand hold — the band holds its breath (間)
 let pendingProg=null;   // destination progression chosen by the scrub selector (drives the V7 pivot)
 let pivotChord=null;    // transient V7 / tritone-sub / altered chord bridging into the destination
@@ -605,8 +611,8 @@ function encodeMIDI(events,bpm,ppq){
   // group by channel
   const chans=new Map();
   sorted.forEach(e=>{if(!chans.has(e.ch))chans.set(e.ch,[]);chans.get(e.ch).push(e);});
-  const trackNames={0:'Voice',1:'Bass',2:'Comping',9:'Drums'};
-  const programs={0:26,1:32,2:0}; // 26=jazz guitar, 32=acoustic bass, 0=piano
+  const trackNames={0:'Voice',1:'Bass',2:'Pad',3:'Piano',4:'Comp',9:'Drums'};
+  const programs={0:26,1:32,2:89,3:0,4:0}; // 26=jazz guitar, 32=acoustic bass, 89=pad, 0=piano
   function buildTrack(ch,evts){
     const d=[];
     // track name
@@ -639,7 +645,7 @@ function encodeMIDI(events,bpm,ppq){
     return d;
   }
   const tracks=[];
-  [0,1,2,9].forEach(ch=>{if(chans.has(ch))tracks.push(buildTrack(ch,chans.get(ch)));});
+  [...chans.keys()].sort((a,b)=>a-b).forEach(ch=>tracks.push(buildTrack(ch,chans.get(ch))));
   if(tracks.length===0) tracks.push(buildTrack(0,[])); // at least one track
   // header
   const h=[...midiStr('MThd'),...midiU32(6),...midiU16(1),...midiU16(tracks.length),...midiU16(ppq)];
@@ -698,7 +704,7 @@ function initiateRecording(){
     padVoices.forEach(v=>{ v.oscs.forEach(o=>{try{o.stop();}catch(_){}}); });
     padVoices=[];
     if(lead.voice){ try{releaseLead(lead.voice);}catch(_){} lead.voice=null; lead.pid=null; }
-    suspended=false; temperature=0.44; leadIntensity=0;
+    suspended=false; temperature=0; outness=0; leadIntensity=0;
     chordIdx=0;
     // stick count-in immediately after fade
     {
@@ -880,8 +886,8 @@ function pianoStab(c, when, vel, dur){
     o1.start(t); o2.start(t); o3.start(t);
     o1.stop(t+dur+0.1); o2.stop(t+dur+0.1); o3.stop(t+dur+0.1);
     gc(o1,o1,o2,o3,g2,flt,env);
-    midiLog(2,0x90,m,Math.round(vel*90),t);
-    midiLog(2,0x80,m,0,t+dur*0.9);
+    midiLog(3,0x90,m,Math.round(vel*90),t);
+    midiLog(3,0x80,m,0,t+dur*0.9);
   });
 }
 
@@ -1173,8 +1179,8 @@ function comp(c,t,vel){
   const notes=c.voicing.slice(2);                         // skip the bass-register tones
   notes.forEach((m,i)=>{
     const tt=t+i*0.014;
-    midiLog(2,0x90,m,Math.round(clamp(vel,0,1)*90),tt);
-    midiLog(2,0x80,m,0,tt+0.85);                          // a gentle roll
+    midiLog(4,0x90,m,Math.round(clamp(vel,0,1)*90),tt);
+    midiLog(4,0x80,m,0,tt+0.85);                          // a gentle roll
     const f=mtof(m);
     const o1=AC.createOscillator();o1.type='triangle';o1.frequency.value=f;
     const o2=AC.createOscillator();o2.type='sawtooth';o2.frequency.value=f;o2.detune.value=-4;
@@ -1549,10 +1555,10 @@ const BandBrain = {
   decide(bar){
     const B=CONFIG.bandBrain;
 
-    // 1) REACTION — the explicit dial AND the soloist's own voice move the band.
-    //    A hot, high, fast solo pulls the band up even with no left-hand prompt.
+    // 1) REACTION — temperature is smoothed per-frame in updateIntensity();
+    //    here we just read its current value as the band's target.
     this.prevTarget=this.target;
-    this.target=clamp(temperature*B.tempWeight + leadIntensity*B.leadWeight, 0, 1);
+    this.target=temperature;
 
     // 2) INTERPRETATION — it's not just how much, but how. A sudden change is
     //    answered suddenly; a gradual creep is followed lazily (a teasing lag).
@@ -1715,14 +1721,29 @@ const Transport = {
 /* snap a continuous target to the nearest available note, biased toward
    chord tones, with a hair of random waver so it breathes like a player.
    Pitch depends ONLY on the vertical target — never on x. */
+function morphedScale(){
+  // outness shifts the entire scale by N semitones — same density, different color
+  if(outness===0) return { scale:leadChord.scale, tones:leadChord.tones };
+  const isDom = leadChord.tension >= CONFIG.outDomTensionThresh;
+  const boost = isDom ? CONFIG.outDomBoost : 1;
+  const shift = clamp(Math.round(outness * CONFIG.outMaxShift * boost), -CONFIG.outMaxShift, CONFIG.outMaxShift);
+  if(shift===0) return { scale:leadChord.scale, tones:leadChord.tones };
+  return {
+    scale: leadChord.scale.map(n=>(n+shift+120)%12),
+    tones: leadChord.tones.map(n=>(n+shift+120)%12),
+  };
+}
 function snapToAvailable(target){
   const lo=CONFIG.leadLo, hi=CONFIG.leadHi;
+  const {scale,tones} = morphedScale();
+  const inScale = m=>scale.includes(((m%12)+12)%12);
+  const isTone  = m=>tones.includes(((m%12)+12)%12);
   let best=null, score=-1e9;
   for(let m=Math.round(target)-4;m<=Math.round(target)+4;m++){
     if(m<lo||m>hi) continue;
-    if(!inScaleLead(m)) continue;
+    if(!inScale(m)) continue;
     let s=-Math.abs(target-m)*1.1;
-    if(isTonePcLead(m)) s+=CONFIG.chordToneWeight;
+    if(isTone(m)) s+=CONFIG.chordToneWeight;
     s+=Math.random()*CONFIG.snapWaver;
     if(s>score){ score=s; best=m; }
   }
@@ -1819,13 +1840,15 @@ function leadDown(e){
   flickCooldownUntil=0;
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
   const midi=snapToAvailable(yToMidi(y01));
+  noteOnsets.push(performance.now());
   lead.voice=createLeadVoice(midi,x01); lastLeadMidi=midi;
   if(REC.leadBase!==null) midiLog(0,0x80,REC.leadBase,0);
   REC.leadBase=midi;
   midiLog(0,0xE0,0,64);
   midiLog(0,0x90,midi,100);
   breakTrail(); pushTrail(e.clientX,e.clientY);
-  ripple(x01,y01,midi);
+  ripple(x01,y01,midi, outness!==0&&!inScaleLead(midi)?OUT_COL:null);
+  if(outness!==0) tutorialNotify('out');
 }
 function leadMove(e){
   if(!AC || lead.pid!==e.pointerId || !lead.voice) return;
@@ -1858,6 +1881,7 @@ function leadMove(e){
   lastLeadMidi=midi;
   if(midi!==lead.voice.midi){
     tutorialNotify('voice');
+    if(outness!==0) tutorialNotify('out');
     const leap=Math.abs(midi-lead.voice.midi)>=CONFIG.leadLeapSemitones && lead.speed>=CONFIG.leadLeapSpeed;
     if(leap){
       // MIDI: rearticulate at ripple points (deliberate attack)
@@ -1865,7 +1889,7 @@ function leadMove(e){
       midiLog(0,0xE0,0,64);
       REC.leadBase=midi;
       midiLog(0,0x90,midi,100);
-      rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi);
+      rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi, outness!==0&&!inScaleLead(midi)?OUT_COL:null);
     } else {
       // MIDI: legato glide — pitch bend using snapped note (reflects chord tone attraction)
       if(REC.leadBase!==null){
@@ -1900,29 +1924,40 @@ function leadUp(e){
   lead.voice=null; lead.pid=null; lead.speed=0; lead.hSpeed=0;
 }
 
-/* leadIntensity = finger speed + register (+ pressure when the device
-   reports it). Smoothed, and it decays to zero once the finger lifts.
+/* leadIntensity = finger speed + register + note-onset activity (+ pressure).
+   Smoothed, and it decays to zero once the finger lifts.
    It also drives the lead's own saturation (the band reacts in phase 4). */
+const noteOnsets=[];                                    // timestamps of recent note-ons
+function noteActivity(){
+  const now=performance.now(), window=3000;             // 3-second rolling window
+  while(noteOnsets.length && now-noteOnsets[0]>window) noteOnsets.shift();
+  return clamp(noteOnsets.length/8, 0, 1);              // 8 notes/3s = full activity
+}
 function updateIntensity(){
+  const activity=noteActivity();
   if(lead.pid!==null && lead.voice){
     const pitch01=clamp((lead.voice.midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo),0,1);
     const spd=clamp(lead.speed/CONFIG.intensitySpeedRef,0,1);
     const w=CONFIG.intensityWeights;
-    let num=spd*w.speed + pitch01*w.height, den=w.speed+w.height;
+    let num=spd*w.speed + pitch01*w.height + activity*w.activity;
+    let den=w.speed+w.height+w.activity;
     if(lead.pressure>0){ num+=lead.pressure*w.pressure; den+=w.pressure; }
     const target=num/den;
     leadIntensity += (target-leadIntensity)*CONFIG.intensityAttack;
-    lead.speed*=0.85; lead.hSpeed*=0.85;             // settle when the finger holds still
+    lead.speed*=0.85; lead.hSpeed*=0.85;
   }else{
-    leadIntensity += (0-leadIntensity)*CONFIG.intensityDecay;
+    // between taps, activity props up a small floor (only noticeable when playing densely)
+    const floor=activity*0.1;
+    leadIntensity += (floor-leadIntensity)*CONFIG.intensityDecay;
   }
   if(leadDrive) leadDrive.gain.setTargetAtTime(
     lerp(timbre.sat0,timbre.sat1,leadIntensity), AC.currentTime, 0.1);
 
-  // temperature gently returns home when the left hand isn't setting it, so the band
-  // calms back to a resting energy instead of staying loud after a push
-  if(left.pid===null)
-    temperature += (CONFIG.bandBrain.restTemp-temperature)*CONFIG.bandBrain.tempReturn;
+  // temperature eases toward a target derived from leadIntensity (power curve)
+  // rises faster than it falls — the band stays hot for a while after intense playing
+  const tempTarget=clamp(Math.pow(leadIntensity,1.5)*CONFIG.bandBrain.tempFromLead, 0, 1);
+  const tempRate = tempTarget>temperature ? 0.04 : 0.012;
+  temperature += (tempTarget-temperature)*tempRate;
 }
 
 /* ---- right-hand OUTSIDE note (fired from leadMove on a deliberate fast flick) ----
@@ -2051,19 +2086,17 @@ function dbg(s){ dbgAction=s; }
 function inLeftZone(x,y){ return x < W*C.zoneW && y > H*C.zoneTop; }
 
 const left={ pid:null, mode:'idle', x:0,y:0, x0:0,y0:0, lastT:0, t0:0,
-             peakVel:0, sumX:0, sumY:0, maxDisp:0, tempStart:0, holdTimer:null };
+             peakVel:0, sumX:0, sumY:0, maxDisp:0, holdTimer:null };
 
 function leftDown(e){
   left.pid=e.pointerId; left.mode='undecided';
   left.x=left.x0=e.clientX; left.y=left.y0=e.clientY;
   left.lastT=left.t0=performance.now();
   left.peakVel=0; left.sumX=0; left.sumY=0; left.maxDisp=0;
-  left.tempStart=temperature;                              // restore point if this turns out NOT to be a temp drag
   clearTimeout(left.holdTimer);
-  // a finger that lands and lingers, barely moving, is a hold — the band breathes out
   left.holdTimer=setTimeout(()=>{
     if(left.mode==='undecided' && left.maxDisp<C.HOLD_DRIFT){
-      temperature=left.tempStart;                          // a hold isn't a temp gesture — undo any micro-drift
+      outness=0;                                           // a hold isn't an outness gesture
       left.mode='hold'; suspended=true; dbg('HOLD ◼ suspend'); tutorialNotify('hold');
     }
   }, C.HOLD_MS);
@@ -2072,33 +2105,55 @@ function leftMove(e){
   if(left.pid!==e.pointerId) return;
   const now=performance.now(), dt=Math.max(now-left.lastT,1);
   const dx=e.clientX-left.x, dy=e.clientY-left.y;
-  const vel=Math.hypot(dx,dy)/dt;                         // px/ms — the discriminator
+  const vel=Math.hypot(dx,dy)/dt;
   left.peakVel=Math.max(left.peakVel,vel);
   left.x=e.clientX; left.y=e.clientY; left.lastT=now;
   left.sumX=e.clientX-left.x0; left.sumY=e.clientY-left.y0;
   left.maxDisp=Math.max(left.maxDisp,Math.hypot(left.sumX,left.sumY));
 
-  if(left.mode==='hold') return;                          // a hold ignores movement
-  if(left.mode==='scrub'){ selectorIndex=xToProgIndex(e.clientX); return; }  // keep choosing
+  if(left.mode==='hold') return;
+  if(left.mode==='scrub'){ selectorIndex=xToProgIndex(e.clientX); return; }
 
   const horiz=Math.abs(left.sumX)>Math.abs(left.sumY)*C.AXIS_RATIO;
   const vert =Math.abs(left.sumY)>Math.abs(left.sumX)*C.AXIS_RATIO;
 
-  // horizontal sweep → enter the progression SCRUB selector (commit on release)
   if(horiz && Math.abs(left.sumX)>C.HSWIPE_MIN_DISP){
-    temperature=left.tempStart;                              // undo any stray heat from the wind-up
+    outness=0;
     left.mode='scrub'; selectorActive=true;
     selectorIndex=xToProgIndex(e.clientX);
     return;
   }
-  // ANY vertical drag adjusts temperature live, regardless of speed — so even a
-  // brisk sweep down to cool actually moves it. If the gesture turns out to be a
-  // flick (a short sharp stab), the change is undone at release (see leftUp).
+  // vertical drag → outness: up = sharp (positive), down = flat (negative)
+  // the absolute position from start determines outness, not incremental delta,
+  // so releasing always snaps back to 0
   if(vert){
-    left.mode='temp';
-    const d=(-dy)/H*C.TEMP_SENSITIVITY;                   // up = hotter, down = cooler
-    temperature=clamp(temperature+d,0,1);
-    dbg('TEMP '+(d>=0?'▲':'▼')+' '+temperature.toFixed(2)); tutorialNotify('temp');
+    left.mode='out';
+    const prev=outness;
+    outness=clamp((-left.sumY)/H*C.TEMP_SENSITIVITY, -1, 1);
+    // if a lead voice is sustaining, glide it to the morphed pitch
+    if(outness!==prev && lead.voice && lead.pid!==null){
+      const y01=clamp(lead.y/H,0,1);
+      const midi=snapToAvailable(yToMidi(y01));
+      if(midi!==lead.voice.midi){
+        const f=mtof(midi), t=AC.currentTime;
+        lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
+        lead.voice.o2.frequency.setTargetAtTime(f,t,0.03);
+        // MIDI: pitch bend to reflect the outness shift
+        if(REC.leadBase!==null){
+          const semi=midi-REC.leadBase;
+          if(Math.abs(semi)>11){
+            midiLog(0,0x80,REC.leadBase,0); midiLog(0,0xE0,0,64);
+            REC.leadBase=midi; midiLog(0,0x90,midi,100);
+          } else {
+            const bend=8192+Math.round(semi*(8192/12));
+            midiLog(0,0xE0,bend&0x7F,(bend>>7)&0x7F);
+          }
+        }
+        lead.voice.midi=midi; lastLeadMidi=midi;
+        ripple(clamp(lead.x/W,0,1),y01,midi, !inScaleLead(midi)?OUT_COL:null);
+      }
+    }
+    dbg('OUT '+(outness>=0?'♯':'♭')+' '+outness.toFixed(2));
   }
 }
 function leftUp(e){
@@ -2106,28 +2161,45 @@ function leftUp(e){
   clearTimeout(left.holdTimer);
   const contact=performance.now()-left.t0;
   if(left.mode==='hold'){
-    suspended=false; dbg('HOLD release');                  // release the held breath
+    suspended=false; dbg('HOLD release');
   }else if(left.mode==='scrub'){
-    selectorActive=false;                                  // commit the chosen progression (V7 pivot follows)
-    if(selectorIndex>=0) commitProgression(selectorIndex); // …unless released in a dead-zone margin
+    selectorActive=false;
+    if(selectorIndex>=0) commitProgression(selectorIndex);
     else dbg('PROG (cancel)');
   }else{
-    // A flick is a SHORT, sharp, vertical STAB: high peak speed, brief contact, and
-    // a small travel. Anything that swept a long way is a temperature drag and is
-    // KEPT — even a brisk one — so sweeping down to cool isn't mistaken for a DROP,
-    // and a flick (which restores temp) doesn't undo a real temperature change.
-    const disp=Math.hypot(left.sumX,left.sumY);            // total travel — direction-agnostic
+    const disp=Math.hypot(left.sumX,left.sumY);
     const isFlick = left.peakVel>=C.FLICK_VEL && contact<=C.FLICK_MAX_MS
                  && disp>=C.FLICK_MIN_DISP && disp<=C.FLICK_MAX_DISP;
     if(isFlick){
-      temperature=left.tempStart;                          // a flick never changes temperature
-      if(left.sumY<0) fireHit(); else fireFill();          // up-ish = hit, down-ish = fill (any direction)
+      if(left.sumY<0) fireHit(); else fireFill();
     }else if(contact<=C.TAP_MAX_MS && left.maxDisp<C.TAP_MAX_DISP){
-      temperature=left.tempStart;                          // a tap isn't a temperature change
-      firePunch();                                         // a quick, repeatable tom/kick punch
+      firePunch();
     }
-    // else: a temperature drag (long and/or slow) — keep the live change
   }
+  // outness snaps back to inside on release — the side-slip resolves
+  if(outness!==0 && lead.voice && lead.pid!==null){
+    outness=0;
+    const y01=clamp(lead.y/H,0,1);
+    const midi=snapToAvailable(yToMidi(y01));
+    if(midi!==lead.voice.midi){
+      const f=mtof(midi), t=AC.currentTime;
+      lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
+      lead.voice.o2.frequency.setTargetAtTime(f,t,0.03);
+      // MIDI: bend back to inside
+      if(REC.leadBase!==null){
+        const semi=midi-REC.leadBase;
+        if(Math.abs(semi)>11){
+          midiLog(0,0x80,REC.leadBase,0); midiLog(0,0xE0,0,64);
+          REC.leadBase=midi; midiLog(0,0x90,midi,100);
+        } else {
+          const bend=8192+Math.round(semi*(8192/12));
+          midiLog(0,0xE0,bend&0x7F,(bend>>7)&0x7F);
+        }
+      }
+      lead.voice.midi=midi; lastLeadMidi=midi;
+      ripple(clamp(lead.x/W,0,1),y01,midi,null);
+    }
+  } else { outness=0; }
   left.pid=null; left.mode='idle';
 }
 
@@ -2184,7 +2256,7 @@ function fireFill(){
 function firePunch(){
   if(!AC) return;
   const t=AC.currentTime+0.02;          // left TAP — a punchy one-shot: floor-tom + kick + snare + cool flash
-  tom(t,0.8,95); kick(t,0.7); snare(t,0.55);
+  tom(t,0.6,95); kick(t,0.5); snare(t,0.4);
   flash.kind='drop'; flash.a=0.24;
   dbg('TAP → PUNCH'); tutorialNotify('tap');
 }
@@ -2282,7 +2354,7 @@ function ghostHold(x,y,alpha,now){              // a press that SUSTAINS (ring h
 }
 
 let tutGhostA=0, tutGhostKind=null;   // eased alpha + the kind we're CURRENTLY showing
-const GHOST_KINDS=['temp','swipe','rflick','kime','fill','tap','hold'];
+const GHOST_KINDS=['out','swipe','rflick','kime','fill','tap','hold'];
 function drawTutorialGhost(now){
   const kind = tutActive ? TUTORIAL_STEPS[tutStep].kind : null;
   const show = GHOST_KINDS.includes(kind);
@@ -2292,7 +2364,7 @@ function drawTutorialGhost(now){
   const A=tutGhostA, k=tutGhostKind;
   const lx=W*C.zoneW*0.5, ly=H*0.74;                 // centre of the narrow left-hand zone
   const tri=Math.sin((now%2200)/2200*Math.PI*2);    // smooth back-and-forth for swipes
-  if(k==='temp')        ghostSwipe(lx,ly-H*0.13,lx,ly+H*0.13, lx,ly+tri*H*0.13, A);          // vertical
+  if(k==='out')         ghostSwipe(lx,ly-H*0.13,lx,ly+H*0.13, lx,ly+tri*H*0.13, A);          // vertical
   else if(k==='swipe'){ const x1=W*0.5, gx=lerp(lx,x1,(tri+1)/2); ghostSwipe(lx,ly,x1,ly, gx,ly, A); } // horizontal
   else if(k==='kime')   ghostFlick(lx,H*0.82, 0,-H*0.15, A, now);    // sharp up-flick
   else if(k==='fill')   ghostFlick(lx,H*0.66, 0, H*0.15, A, now);    // sharp down-flick
@@ -2326,12 +2398,23 @@ function frame(){
   g.addColorStop(1,`rgb(4,5,${(11+4*bgTension)|0})`);
   cx.fillStyle=g;cx.fillRect(0,0,W,H);
 
-  // temperature — the edges take on heat (warm) as the left hand swipes up
+  // temperature — the edges take on heat (warm) driven by playing intensity
   if(temperature>0.01){
     const eg=cx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.28,W/2,H/2,Math.max(W,H)*0.72);
     eg.addColorStop(0,'rgba(0,0,0,0)');
     eg.addColorStop(1,`rgba(255,${(150-temperature*70)|0},50,${temperature*0.30})`);
     cx.fillStyle=eg;cx.fillRect(0,0,W,H);
+  }
+
+  // outness — cool tension glow (blue-purple) when the left hand morphs the note set
+  const absOut=Math.abs(outness);
+  if(absOut>0.01){
+    const eg2=cx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.25,W/2,H/2,Math.max(W,H)*0.68);
+    eg2.addColorStop(0,'rgba(0,0,0,0)');
+    // sharp (positive) = blue, flat (negative) = purple
+    const r=outness<0?120:40, g2=outness<0?40:80, b=220;
+    eg2.addColorStop(1,`rgba(${r},${g2},${b},${absOut*0.15})`);
+    cx.fillStyle=eg2;cx.fillRect(0,0,W,H);
   }
 
   // soft concentric blooms on each beat — emanating from low (a quarter up from the bottom)
@@ -2449,14 +2532,18 @@ function frame(){
   if(CONFIG.debug && dbgEl){
     const leadNote = lastLeadMidi!==null ? midiName(lastLeadMidi) : '—';
     const fillRem = fillAtBeat>=0 ? Math.max(0,fillAtBeat-Math.floor(beatPos())) : -1;
+    const _ms=morphedScale(), _isDom=leadChord.tension>=CONFIG.outDomTensionThresh;
+    const _boost=_isDom?CONFIG.outDomBoost:1;
+    const _shift=Math.round(outness*CONFIG.outMaxShift*_boost);
     dbgEl.textContent =
       '▸ '+dbgAction+'\n'+
+      'out '+(_shift===0?'—':(_shift>0?'+':'')+_shift)+(_isDom?' DOM':'')+'\n'+
+      'lead '+leadNote+'  i'+leadIntensity.toFixed(2)+'\n'+
+      'band '+BandBrain.effDrive.toFixed(2)+'→'+BandBrain.target.toFixed(2)+(BandBrain.dev?('  ✦'+BandBrain.dev.type):'')+'\n'+
       'temp '+temperature.toFixed(2)+(suspended?'  HOLD':'')+'\n'+
       'style '+style.name+'\n'+
       'prog '+PROGRESSIONS[progIdx].name+'\n'+
       'chord '+leadChord.name+'\n'+
-      'lead '+leadNote+'  i'+leadIntensity.toFixed(2)+'\n'+
-      'band '+BandBrain.effDrive.toFixed(2)+'→'+BandBrain.target.toFixed(2)+(BandBrain.dev?('  ✦'+BandBrain.dev.type):'')+'\n'+
       'fill '+(fillRem>=0?(fillRem+'b → s'+bandStrength().toFixed(2)):'—');
   }
   requestAnimationFrame(frame);
@@ -2611,12 +2698,12 @@ syncHud(); syncVoice(); syncStyle(); syncChord();   // initial state
 const TUTORIAL_STEPS=[
   {kind:'voice', title:'Voice',             text:'Touch the screen and move your finger.\nUp/down is pitch, left/right is expression.',
                  titleJP:'ボイス',          textJP:'画面をタッチして指を動かす。\n上下が音程、左右が表情。'},
-  {kind:'rflick',title:'Out',               text:'Flick sharply in any direction.\nOne note just outside the key sounds.',
-                 titleJP:'アウト',          textJP:'任意の向きに鋭くフリック。\nキー外の音が一つ鳴ります。'},
-  {kind:'temp',  title:'Temperature',       text:'Drag up in the bottom-left to heat, down to cool.\nIt drifts back a moment after you release.',
-                 titleJP:'温度',            textJP:'画面左下を上にドラッグでバンドを加熱、下で冷却。\n離してしばらくすると元に戻ります。'},
-  {kind:'hold',  title:'Breath',            text:'Hold in the bottom-left and the band holds its breath.\nIt returns the moment you release.',
-                 titleJP:'ブレス',          textJP:'画面左下をホールドする間、バンドが息を潜める。\n離すとすぐに戻ります。'},
+  {kind:'rflick',title:'Out (flick)',         text:'Flick sharply in any direction.\nOne note just outside the key sounds.',
+                 titleJP:'アウト（フリック）', textJP:'任意の向きに鋭くフリック。\nキー外の音が一つ鳴ります。'},
+  {kind:'out',   title:'Out (slide)',        text:'Drag up/down in the bottom-left to shift the scale.\nPlay with your right hand to go outside — release to resolve.',
+                 titleJP:'アウト（スライド）', textJP:'画面左下を上下ドラッグでスケールをシフト。\nそのまま右手で演奏してアウト、離すと解決。'},
+  {kind:'hold',  title:'Breath',            text:'Hold still in the bottom-left and the band holds its breath.\nIt returns the moment you release.',
+                 titleJP:'ブレス',          textJP:'画面左下を動かさずにホールドすると、バンドが息を潜める。\n離すとすぐに戻ります。'},
   {kind:'tap',   title:'Shot',              text:'Tap lightly in the bottom-left for a snare accent.',
                  titleJP:'ショット',        textJP:'画面左下を軽くタップで、スネアのアクセント。'},
   {kind:'kime',  title:'Crash',             text:'Flick sharply up in the bottom-left for a crash.',
