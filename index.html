@@ -21,7 +21,7 @@
     -webkit-user-select:none;user-select:none;
     -webkit-tap-highlight-color:transparent;
   }
-  /* the night is playable everywhere; no controls float over it (VC: 明示的UIは出さない) */
+  /* the night is playable everywhere; no controls float over it (明示的UIは出さない) */
   #stage{position:fixed;inset:0;display:block;touch-action:none;cursor:default;}
 
   /* debug HUD — top-right, gated by CONFIG.debug; not part of the real instrument */
@@ -167,10 +167,10 @@
 <div id="gear" title="Settings"></div>
 <div id="settings">
   <div class="srow"><span>Style</span><span class="seg" id="style-seg"><span class="opt on" id="style-0">Sw</span><span class="opt" id="style-1">Bb</span><span class="opt" id="style-2">Bo</span><span class="opt" id="style-3">Wz</span></span></div>
-  <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
   <div class="srow"><span>Chord</span><span class="seg"><span class="opt on" id="chord-pad">Pad</span><span class="opt" id="chord-piano">Piano</span></span></div>
   <div class="srow"><span>Rec</span><span class="seg"><span class="opt" id="rec-btn">● REC</span><span class="opt off" id="rec-wav">WAV</span><span class="opt off" id="rec-mid">MIDI</span></span></div>
+  <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
 </div>
 <span id="rec-label">REC</span>
@@ -197,7 +197,7 @@
 <script>
 'use strict';
 /* ================================================================
-   VOICE CONDUCTOR — a single-file contemporary-jazz instrument.
+   FILAMENT — a single-file contemporary-jazz instrument.
    Web Audio API + Canvas, zero dependencies.
 
    PHASE 1: Transport + AudioEngine + RhythmSection.
@@ -776,11 +776,11 @@ function dlBlob(blob,name){
 }
 function downloadWAV(){
   if(REC.state!=='stopped'||REC.sampleCount===0) return;
-  dlBlob(encodeWAV(REC.samples,AC.sampleRate),'vc-mix-'+recTimecode()+'.wav');
+  dlBlob(encodeWAV(REC.samples,AC.sampleRate),'filament-mix-'+recTimecode()+'.wav');
 }
 function downloadMIDI(){
   if(REC.state!=='stopped'||REC.midi.length===0) return;
-  dlBlob(encodeMIDI(REC.midi,CONFIG.bpm),'vc-all-'+recTimecode()+'.mid');
+  dlBlob(encodeMIDI(REC.midi,CONFIG.bpm),'filament-all-'+recTimecode()+'.mid');
 }
 
 function syncRecUI(){
@@ -885,7 +885,7 @@ function pianoStab(c, when, vel, dur){
   });
 }
 
-/* piano comping — called from scheduleBeat when chordTone==='piano'.
+/* piano comping — called from scheduleBeat when usePiano is true.
    Each style gets its own rhythmic vocabulary with enough variation
    to never sound like a fixed loop. */
 function pianoComp(t, beatInBar){
@@ -967,10 +967,9 @@ function playPiano(c, when){
   pianoStab(c, when, 0.75, CONFIG.chordChangeEveryBars * CONFIG.beatsPerBar * (Transport.beatDur || 60/CONFIG.bpm));
 }
 
-let chordTone='pad';
+let usePad=true, usePiano=false;
 function playChordVoicing(c, when){
-  if(chordTone==='piano') return;  // pianoComp handles voicing beat-by-beat from scheduleBeat
-  playPad(c, when);
+  if(usePad) playPad(c, when);
 }
 
 function applyChord(c, when){              // set ANY chord (progression chord or a transient pivot)
@@ -1230,7 +1229,7 @@ function scheduleBeat(t,beatInBar){
   const band = E<G.halfTimeBelow ? 'half' : (E>G.burningAbove ? 'burn' : 'swing');
   style.drums(t,beatInBar,band);                            // the active genre supplies the kit/pattern
   style.bass(t,beatInBar,band);
-  if(chordTone==='piano') pianoComp(t,beatInBar);
+  if(usePiano) pianoComp(t,beatInBar);
 }
 
 /* SWING (mid) & BURNING (high) drums. Densities/dynamics open with energy; in the
@@ -1692,7 +1691,7 @@ const Transport = {
 
     // breathing comping stab near the top of the bar (denser as comp energy rises)
     // skip when Piano chord tone is active — the piano voicing covers the harmonic role
-    if(chordTone!=='piano' && bandPlaying() && Math.random()<clamp(CONFIG.compProb*(0.5+1.0*BandBrain.parts.comp),0,1))
+    if(!usePiano && bandPlaying() && Math.random()<clamp(CONFIG.compProb*(0.5+1.0*BandBrain.parts.comp),0,1))
       comp(chord,t+rand(0,0.02),rand(0.7,1));
   },
 
@@ -2571,12 +2570,15 @@ function switchStyle(i){
 styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); switchStyle(i); syncStyle(); }));
 // Chord tone selector (Pad / Piano)
 const chordPadBtn=document.getElementById('chord-pad'), chordPianoBtn=document.getElementById('chord-piano');
-function syncChord(){ chordPadBtn.classList.toggle('on',chordTone==='pad'); chordPianoBtn.classList.toggle('on',chordTone==='piano'); }
-chordPadBtn.addEventListener('click',e=>{ e.stopPropagation(); chordTone='pad'; syncChord(); });
+function syncChord(){ chordPadBtn.classList.toggle('on',usePad); chordPianoBtn.classList.toggle('on',usePiano); }
+chordPadBtn.addEventListener('click',e=>{
+  e.stopPropagation(); usePad=!usePad;
+  if(!usePad){ padVoices.forEach(v=>{ v.oscs.forEach(o=>{try{o.stop();}catch(_){}}); }); padVoices=[]; }
+  syncChord();
+});
 chordPianoBtn.addEventListener('click',e=>{
-  e.stopPropagation(); chordTone='piano'; syncChord();
-  padVoices.forEach(v=>{ v.oscs.forEach(o=>{try{o.stop();}catch(_){}}); });
-  padVoices=[];
+  e.stopPropagation(); usePiano=!usePiano;
+  syncChord();
 });
 // Rec buttons — REC starts countdown (or stops), Save downloads WAV+MIDI
 recBtn.addEventListener('click',e=>{
