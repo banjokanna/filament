@@ -1027,7 +1027,7 @@ function buildDominant(targetRootPc, kind){
    RHYTHM SECTION — brushed swing trio. Every voice is scheduled at an
    absolute AudioContext time handed down by the Transport.
    ================================================================ */
-let bassCur=36;
+let bassCur=40;
 let bassBusyBeat=0;   // a multi-beat bass figure (2-beat triplet) occupies beats until here
 
 function ride(t,vel,legato=0){
@@ -1199,9 +1199,10 @@ function comp(c,t,vel){
 
 /* walking upright bass over the CURRENT chord: root on the one, scale
    steps between, chromatic approaches back into the next root */
+const BASS_LO=33, BASS_HI=48;                               // A1–C3: idiomatic jazz walking range
 const lowNear=(pc,ref)=>{
   let best=null,bd=99;
-  for(let m=26;m<=46;m++)if(((m%12)+12)%12===pc){
+  for(let m=BASS_LO;m<=BASS_HI;m++)if(((m%12)+12)%12===pc){
     const d=Math.abs(m-ref);if(d<bd){bd=d;best=m;}
   }
   return best??ref;
@@ -1213,12 +1214,12 @@ function bassNoteFor(b){
   }else if(b===CONFIG.beatsPerBar-1){                     // approach the next downbeat
     const tgt=lowNear(rootPc,bassCur);
     bassCur=Math.random()<0.5
-      ?clamp(tgt+(Math.random()<0.5?1:-1),26,46)          // chromatic from above/below
-      :clamp(scaleStep(bassCur,Math.sign(tgt-bassCur)||1),26,46);
+      ?clamp(tgt+(Math.random()<0.5?1:-1),BASS_LO,BASS_HI)          // chromatic from above/below
+      :clamp(scaleStep(bassCur,Math.sign(tgt-bassCur)||1),BASS_LO,BASS_HI);
   }else{                                                  // walk by scale steps
     const tgt=lowNear(rootPc,bassCur);
     const dir=Math.random()<0.55?(Math.random()<0.5?1:-1):(Math.sign(tgt-bassCur)||1);
-    bassCur=clamp(scaleStep(bassCur,dir*(Math.random()<0.8?1:2)),26,46);
+    bassCur=clamp(scaleStep(bassCur,dir*(Math.random()<0.8?1:2)),BASS_LO,BASS_HI);
   }
   return bassCur;
 }
@@ -1436,7 +1437,7 @@ function bassTripletBeat(t,b){                              // 1-beat (eighth-no
   let m=bassNoteFor(b); const dir=Math.random()<0.6?1:-1;
   for(let i=0;i<3;i++){
     bassPluck(t+i*sub+rand(-0.004,0.004),m,(i===0?0.85:0.6),sub*1.15);
-    m=clamp(scaleStep(m,dir),26,46);
+    m=clamp(scaleStep(m,dir),BASS_LO,BASS_HI);
   }
   bassCur=m;
 }
@@ -1445,7 +1446,7 @@ function bass2BeatTriplet(t,b){                             // 2-beat (quarter-n
   let m=bassNoteFor(b); const dir=Math.random()<0.6?1:-1;
   for(let i=0;i<3;i++){
     bassPluck(t+i*sub+rand(-0.004,0.004),m,(i===0?0.85:0.62),sub*1.05);
-    m=clamp(scaleStep(m,dir),26,46);
+    m=clamp(scaleStep(m,dir),BASS_LO,BASS_HI);
   }
   bassCur=m;
 }
@@ -1504,7 +1505,7 @@ function scheduleBossaBass(t,b,band){
   }
   if(b===3 && Math.random()<0.35){
     const tgt=lowNear(chord.tones[0],bassCur);
-    bassCur=clamp(tgt+(Math.random()<0.5?1:-1),26,46);
+    bassCur=clamp(tgt+(Math.random()<0.5?1:-1),BASS_LO,BASS_HI);
     bassPluck(j(),bassCur,0.5*acc,BEAT*0.8);
   }
 }
@@ -1622,7 +1623,7 @@ const Transport = {
     this.beatDur=60/CONFIG.bpm;
     this.nextBeatTime=AC.currentTime+0.08;
     this.beat=0;
-    bassCur=lowNear(chord.tones[0],36);
+    bassCur=lowNear(chord.tones[0],40);
     BandBrain.reset();
     this.running=true;
     this.timer=setInterval(()=>this.tick(),CONFIG.schedulerInterval);
@@ -1891,10 +1892,11 @@ function leadMove(e){
       midiLog(0,0x90,midi,100);
       rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi, outness!==0&&!inScaleLead(midi)?OUT_COL:null);
     } else {
-      // MIDI: legato glide — pitch bend using snapped note (reflects chord tone attraction)
+      // MIDI: legato glide — pitch bend, but rearticulate if drift exceeds 4 semitones
+      // to prevent abnormally long notes during continuous sweeps
       if(REC.leadBase!==null){
         const semi=midi-REC.leadBase;
-        if(Math.abs(semi)>11){
+        if(Math.abs(semi)>4){
           midiLog(0,0x80,REC.leadBase,0);
           midiLog(0,0xE0,0,64);
           REC.leadBase=midi;
@@ -2138,10 +2140,10 @@ function leftMove(e){
         const f=mtof(midi), t=AC.currentTime;
         lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
         lead.voice.o2.frequency.setTargetAtTime(f,t,0.03);
-        // MIDI: pitch bend to reflect the outness shift
+        // MIDI: pitch bend to reflect the outness shift (rearticulate if drift > 4)
         if(REC.leadBase!==null){
           const semi=midi-REC.leadBase;
-          if(Math.abs(semi)>11){
+          if(Math.abs(semi)>4){
             midiLog(0,0x80,REC.leadBase,0); midiLog(0,0xE0,0,64);
             REC.leadBase=midi; midiLog(0,0x90,midi,100);
           } else {
@@ -2185,10 +2187,10 @@ function leftUp(e){
       const f=mtof(midi), t=AC.currentTime;
       lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
       lead.voice.o2.frequency.setTargetAtTime(f,t,0.03);
-      // MIDI: bend back to inside
+      // MIDI: bend back to inside (rearticulate if drift > 4)
       if(REC.leadBase!==null){
         const semi=midi-REC.leadBase;
-        if(Math.abs(semi)>11){
+        if(Math.abs(semi)>4){
           midiLog(0,0x80,REC.leadBase,0); midiLog(0,0xE0,0,64);
           REC.leadBase=midi; midiLog(0,0x90,midi,100);
         } else {
@@ -2650,7 +2652,7 @@ function switchStyle(i){
       chordIdx=0;
       setChord(0, AC.currentTime+0.06);
       playChordVoicing(CHORDS[0], AC.currentTime+0.06);
-      bassCur=lowNear(chord.tones[0],36);
+      bassCur=lowNear(chord.tones[0],40);
       BandBrain.reset();
       if(bandDry) bandDry.gain.setValueAtTime(lerp(0.62,1.12,BandBrain.effDrive),AC.currentTime);
       master.gain.setTargetAtTime(CONFIG.masterGain, AC.currentTime, fadeIn/4);
@@ -2700,7 +2702,7 @@ const TUTORIAL_STEPS=[
                  titleJP:'ボイス',          textJP:'画面をタッチして指を動かす。\n上下が音程、左右が表情。'},
   {kind:'rflick',title:'Out (flick)',         text:'Flick sharply in any direction.\nOne note just outside the key sounds.',
                  titleJP:'アウト（フリック）', textJP:'任意の向きに鋭くフリック。\nキー外の音が一つ鳴ります。'},
-  {kind:'out',   title:'Out (slide)',        text:'Drag up/down in the bottom-left to shift the scale.\nPlay with your right hand to go outside — release to resolve.',
+  {kind:'out',   title:'Out (slide)',        text:'Drag up/down at bottom-left to shift the scale.\nPlay right hand to go outside — release to resolve.',
                  titleJP:'アウト（スライド）', textJP:'画面左下を上下ドラッグでスケールをシフト。\nそのまま右手で演奏してアウト、離すと解決。'},
   {kind:'hold',  title:'Breath',            text:'Hold still in the bottom-left and the band holds its breath.\nIt returns the moment you release.',
                  titleJP:'ブレス',          textJP:'画面左下を動かさずにホールドすると、バンドが息を潜める。\n離すとすぐに戻ります。'},
