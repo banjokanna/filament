@@ -102,6 +102,57 @@
   .srow .pgrid .opt.on{color:var(--ink);background:var(--gold);}
   .srow .pgrid .opt.pending{animation:progBlink .5s ease-in-out infinite;}
   .srow .pgrid .opt.empty{pointer-events:none;color:transparent;}
+  #settings .srow-hint{
+    position:fixed;bottom:calc(6px + env(safe-area-inset-bottom));
+    height:40px;line-height:40px;
+    width:min(82vw,360px);left:50%;transform:translateX(-50%);
+    text-align:left;padding:0 2px;
+    font-size:9px;letter-spacing:.1em;color:rgba(232,213,163,.4);
+  }
+  .srow .pgrid .prow2{display:flex;gap:6px;align-items:stretch;}
+  .srow .pgrid .prow2>.prow{flex:none;width:75%;}
+  .srow .pgrid .ed-opt{
+    flex:none;width:calc(25% - 6px);font-size:8px;letter-spacing:.08em;color:rgba(232,213,163,.5);
+    padding:4px 0;cursor:pointer;transition:all .2s;text-align:center;
+    border:1px solid rgba(232,213,163,.3);border-radius:6px;
+    background:rgba(6,7,16,.82);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    display:flex;align-items:center;justify-content:center;
+  }
+  /* chord editor overlay */
+  #chord-editor{
+    position:fixed;inset:0;z-index:12;display:none;
+    flex-direction:column;align-items:center;justify-content:center;gap:14px;
+    background:rgba(5,6,14,.92);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    color:var(--gold);text-align:center;padding:32px 24px;
+  }
+  #chord-editor.open{display:flex;}
+  #chord-editor .ed-label{font-size:10px;letter-spacing:.22em;color:rgba(232,213,163,.6);}
+  #chord-editor .ed-wrap{position:relative;width:min(85vw,340px);}
+  #chord-editor textarea{
+    width:100%;height:72px;resize:none;
+    background:rgba(232,213,163,.06);border:1px solid rgba(232,213,163,.25);border-radius:3px;
+    color:var(--gold);font-family:ui-monospace,Menlo,monospace;font-size:12px;line-height:1.6;
+    padding:10px 28px 10px 10px;outline:none;box-sizing:border-box;
+  }
+  #chord-editor textarea:focus{border-color:rgba(232,213,163,.5);}
+  #chord-editor .ed-clear{
+    position:absolute;right:6px;bottom:6px;
+    width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+    background:transparent;border:none;color:rgba(232,213,163,.3);
+    font-size:14px;line-height:1;cursor:pointer;padding:0;
+  }
+  #chord-editor .ed-clear:hover{color:rgba(232,213,163,.7);}
+  #chord-editor .ed-hint{font-size:9px;letter-spacing:.06em;color:rgba(232,213,163,.35);max-width:340px;line-height:1.6;}
+  #chord-editor .ed-err{font-size:9px;letter-spacing:.06em;color:rgba(201,138,138,.8);min-height:1.2em;}
+  #chord-editor .ed-row{display:flex;gap:8px;width:min(85vw,340px);}
+  #chord-editor .ed-btn{
+    flex:1;background:transparent;border:1px solid rgba(232,213,163,.3);border-radius:2px;
+    color:var(--gold);font-family:inherit;font-size:9px;letter-spacing:.16em;
+    padding:7px 0;cursor:pointer;transition:all .25s;text-align:center;
+  }
+  #chord-editor .ed-btn:hover{background:rgba(232,213,163,.08);}
+  #chord-editor .ed-btn.primary{color:var(--ink);background:var(--gold);border-color:var(--gold);}
+  #chord-editor .ed-btn.primary:hover{background:rgba(232,213,163,.85);}
   @keyframes progBlink{0%,100%{color:var(--ink);background:var(--gold)}50%{color:rgba(232,213,163,.5);background:transparent}}
   @keyframes recPulse{0%,100%{opacity:1}50%{opacity:.4}}
 
@@ -187,8 +238,23 @@
   <div class="srow"><span>Chord</span><span class="seg"><span class="opt on" id="chord-pad">Pad</span><span class="opt on" id="chord-piano">Piano</span></span></div>
   <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
   <div class="srow"><span>Rec</span><span class="seg"><span class="opt" id="rec-btn">● REC</span><span class="opt off" id="rec-wav">WAV</span><span class="opt off" id="rec-mid">MIDI</span></span></div>
+  <div class="srow-hint">Use earphones for screen recording</div>
 </div>
 <span id="rec-label">REC</span>
+
+<div id="chord-editor">
+  <div class="ed-label">CHORD PROGRESSION</div>
+  <div class="ed-wrap">
+    <textarea id="ed-input" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+    <button class="ed-clear" id="ed-clear">✕</button>
+  </div>
+  <div class="ed-hint">| Cmaj7 | Am7 | Dm7 | G7 |&ensp; % = repeat&ensp; max 16 bars</div>
+  <div class="ed-err" id="ed-err"></div>
+  <div class="ed-row">
+    <button class="ed-btn" id="ed-cancel">CANCEL</button>
+    <button class="ed-btn primary" id="ed-save">SAVE</button>
+  </div>
+</div>
 
 <div id="tutorial">
   <div class="card">
@@ -368,13 +434,126 @@ const TIMBRES = [
 let timbreIdx=0, timbre=TIMBRES[0];
 
 /* ================================================================
+   CHORD DATABASE + PARSER — builds chord objects from lead-sheet symbols.
+   Every entry carries the scale, tones, a voicing template (intervals above
+   root 0), and a tension value. parseChordSymbol() turns "Dbmaj7#11" into
+   {root:1, type:'maj7#11'} and buildChordFromSymbol() generates the full
+   chord object used by the engine (same shape as the preset PROGRESSIONS).
+   ================================================================ */
+const CHORD_DB = {
+  'maj7':     {scale:[0,2,4,5,7,9,11], tones:[0,4,7,11], vt:[0,16,23,30,38], tension:0.15},
+  '6':        {scale:[0,2,4,5,7,9,11], tones:[0,4,7,9],  vt:[0,16,21,28,33], tension:0.12},
+  'maj7#11':  {scale:[0,2,4,6,7,9,11], tones:[0,4,7,11], vt:[0,16,23,30,38], tension:0.25},
+  'maj7#5':   {scale:[0,2,4,6,8,9,11], tones:[0,4,8,11], vt:[0,11,16,20,26], tension:0.50},
+  'm7':       {scale:[0,2,3,5,7,9,10], tones:[0,3,7,10], vt:[0,14,17,22,27], tension:0.30},
+  'm9':       {scale:[0,2,3,5,7,9,10], tones:[0,3,7,10,2], vt:[0,14,17,22,26], tension:0.25},
+  'm11':      {scale:[0,2,3,5,7,9,10], tones:[0,3,7,10,5], vt:[0,17,22,27,31], tension:0.35},
+  'm6':       {scale:[0,2,3,5,7,9,10], tones:[0,3,7,9],  vt:[0,14,17,21,26], tension:0.28},
+  'mmaj7':    {scale:[0,2,3,5,7,9,11], tones:[0,3,7,11], vt:[0,15,23,26,31], tension:0.50},
+  '7':        {scale:[0,2,4,5,7,9,10], tones:[0,4,7,10], vt:[0,10,16,21,28], tension:0.40},
+  '9':        {scale:[0,2,4,5,7,9,10], tones:[0,4,7,10,2], vt:[0,10,16,21,26], tension:0.38},
+  '13':       {scale:[0,2,4,5,7,9,10], tones:[0,4,7,10,9], vt:[0,10,16,21,33], tension:0.42},
+  '7#11':     {scale:[0,2,4,6,7,9,10], tones:[0,4,7,10], vt:[0,10,16,22,28], tension:0.48},
+  '7#9':      {scale:[0,2,4,5,7,8,10], tones:[0,4,10,3], vt:[0,15,22,27,34], tension:0.70},
+  '7b9':      {scale:[0,1,4,5,7,8,10], tones:[0,4,10,1], vt:[0,13,22,25,34], tension:0.72},
+  '7b13':     {scale:[0,2,4,5,7,8,10], tones:[0,4,7,10], vt:[0,10,16,20,28], tension:0.65},
+  '7alt':     {scale:[0,1,3,4,6,8,10], tones:[0,4,10],   vt:[0,10,16,22,27], tension:0.85},
+  'm7b5':     {scale:[0,1,3,5,6,8,10], tones:[0,3,6,10], vt:[0,10,15,18,25], tension:0.65},
+  'dim7':     {scale:[0,2,3,5,6,8,9,11],tones:[0,3,6,9], vt:[0,3,6,9,12],    tension:0.80},
+  'sus4':     {scale:[0,2,5,7,9,10],    tones:[0,5,7,10], vt:[0,10,17,22,29], tension:0.30},
+  'sus2':     {scale:[0,2,5,7,9,10],    tones:[0,2,7,10], vt:[0,10,14,19,26], tension:0.28},
+  '7sus4':    {scale:[0,2,5,7,9,10],    tones:[0,5,7,10], vt:[0,10,17,22,29], tension:0.35},
+  'aug':      {scale:[0,2,4,6,8,10],    tones:[0,4,8],    vt:[0,4,8,16,20],   tension:0.60},
+  'min':      {scale:[0,2,3,5,7,8,10],  tones:[0,3,7],    vt:[0,15,19,24,31], tension:0.25},
+  'maj':      {scale:[0,2,4,5,7,9,11],  tones:[0,4,7],    vt:[0,16,19,28,31], tension:0.10},
+};
+
+const ROOT_MAP = {
+  'C':0,'C#':1,'Db':1,'D':2,'D#':3,'Eb':3,'E':4,'Fb':4,'E#':5,'F':5,
+  'F#':6,'Gb':6,'G':7,'G#':8,'Ab':8,'A':9,'A#':10,'Bb':10,'B':11,'Cb':11,
+};
+const ROOT_NAMES_SHARP=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const ROOT_NAMES_FLAT =['C','D♭','D','E♭','E','F','G♭','G','A♭','A','B♭','B'];
+const FLAT_ROOTS=new Set([1,3,5,8,10]);
+
+function parseChordSymbol(sym){
+  sym=sym.trim()
+    .replace(/♯/g,'#').replace(/♭/g,'b')
+    .replace(/Δ|△/g,'maj')
+    .replace(/ø/g,'m7b5').replace(/°7?/g,v=>v.length>1?'dim7':'dim7')
+    .replace(/\-/g,'m');
+  const rm=sym.match(/^([A-G][b#]?)(.*)/);
+  if(!rm) return null;
+  const rootPc=ROOT_MAP[rm[1]];
+  if(rootPc===undefined) return null;
+  let qual=rm[2].trim();
+  if(qual==='') qual='maj';
+  else if(qual==='m') qual='min';
+  else if(qual==='min7') qual='m7';
+  else if(qual==='min9') qual='m9';
+  else if(qual==='min11') qual='m11';
+  else if(qual==='M7'||qual==='maj9') qual='maj7';
+  else if(qual==='maj13') qual='maj7';
+  else if(qual==='m(maj7)'||qual==='mM7'||qual==='minmaj7') qual='mmaj7';
+  else if(qual==='7(#11)'||qual==='7#11'||qual==='lyd7') qual='7#11';
+  else if(qual==='7(#9)'||qual==='7#9') qual='7#9';
+  else if(qual==='7(b9)'||qual==='7b9') qual='7b9';
+  else if(qual==='7(b13)'||qual==='7b13') qual='7b13';
+  else if(qual==='7(alt)'||qual==='7alt'||qual==='alt') qual='7alt';
+  else if(qual==='m7(b5)'||qual==='m7b5') qual='m7b5';
+  else if(qual==='dim'||qual==='dim7'||qual==='o7') qual='dim7';
+  else if(qual==='maj7(#11)'||qual==='maj7#11') qual='maj7#11';
+  else if(qual==='maj7(#5)'||qual==='maj7#5') qual='maj7#5';
+  else if(qual==='7sus'||qual==='7sus4') qual='7sus4';
+  else if(qual==='+'||qual==='aug') qual='aug';
+  if(!CHORD_DB[qual]) qual='maj7';
+  return {root:rootPc, type:qual};
+}
+
+function buildChordFromSymbol(sym){
+  const p=parseChordSymbol(sym);
+  if(!p) return null;
+  const db=CHORD_DB[p.type], pc=x=>((x%12)+12)%12;
+  const scale=db.scale.map(s=>pc(s+p.root));
+  const tones=db.tones.map(s=>pc(s+p.root));
+  const baseOctave=36+p.root;
+  const voicing=db.vt.map(v=>baseOctave+v);
+  const useFlatName=FLAT_ROOTS.has(p.root);
+  const rootName=useFlatName?ROOT_NAMES_FLAT[p.root]:ROOT_NAMES_SHARP[p.root];
+  const typeDisplay=p.type.replace(/#/g,'♯').replace(/b/g,'♭')
+    .replace(/^maj$/,'maj').replace(/^min$/,'m');
+  const name=rootName+(typeDisplay==='maj'?'':typeDisplay==='min'?'m':typeDisplay);
+  const scaleName=rootName+' '+p.type;
+  return {name, scaleName, scale, tones, voicing, tension:db.tension};
+}
+
+function parseLeadSheet(text){
+  const cleaned=text.replace(/\|/g,' | ').replace(/\s+/g,' ').trim();
+  const tokens=cleaned.split(/\s+/).filter(t=>t!=='|'&&t!=='');
+  const bars=[];
+  for(const tok of tokens){
+    if(tok==='%'){
+      bars.push(bars.length>0?bars[bars.length-1]:null);
+    } else {
+      const c=buildChordFromSymbol(tok);
+      bars.push(c);
+    }
+  }
+  if(bars.length===0||bars.length>16) return null;
+  return bars.filter(Boolean);
+}
+
+const CUSTOM_DEFAULT='| G | FM7 | G | FM7 | C | Bm7 | E | DM7 | E | DM7 | A | D |';
+
+/* ================================================================
    HARMONY DATA — pc = pitch classes (0 = C).
    Phase 1 runs the FLOATING progression (chromatic mediants &
    3-tonic axis; Lydian / altered / melodic-minor colours).
    A second modal-pedal pool and the Coltrane pool arrive in phase 3.
    ================================================================ */
+const CUSTOM_PROG_IDX=6;
 const PROGRESSIONS = [
-{name:'Float', chords:[
+{name:'Float', barsPerChord:2, chords:[
  {name:'Cmaj7(♯11)',  scaleName:'C Lydian',            scale:[0,2,4,6,7,9,11],   tones:[0,4,7,11],   voicing:[36,52,59,66,74], tension:0.20},
  {name:'E♭maj7(♯11)', scaleName:'E♭ Lydian',           scale:[3,5,7,9,10,0,2],   tones:[3,7,10,2],   voicing:[39,55,62,69,74], tension:0.30},
  {name:'Gmaj7(♯5)',   scaleName:'G Lydian Augmented',  scale:[7,9,11,1,3,4,6],   tones:[7,11,3,6],   voicing:[43,54,59,63,69], tension:0.55},
@@ -388,7 +567,7 @@ const PROGRESSIONS = [
  {name:'Fmaj7(♯5)',   scaleName:'F Lydian Augmented',  scale:[5,7,9,11,1,2,4],   tones:[5,9,1,4],    voicing:[41,52,57,61,67], tension:0.60},
  {name:'D♭maj7(♯11)', scaleName:'D♭ Lydian',           scale:[1,3,5,7,8,10,0],   tones:[1,5,8,0],    voicing:[37,53,60,67,72], tension:0.25},
 ]},
-{name:'Vista', chords:[
+{name:'Vista', barsPerChord:2, chords:[
  {name:'Gmaj9',       scaleName:'G Lydian',            scale:[7,9,11,1,2,4,6],   tones:[7,11,2,6],   voicing:[43,54,59,64,69], tension:0.10},
  {name:'Emin9',       scaleName:'E Dorian',            scale:[4,6,7,9,11,1,2],   tones:[4,7,11,2],   voicing:[40,50,55,59,66], tension:0.20},
  {name:'Amin11',      scaleName:'A Dorian',            scale:[9,11,0,2,4,6,7],   tones:[9,0,4,7],    voicing:[45,55,60,64,71], tension:0.25},
@@ -398,7 +577,7 @@ const PROGRESSIONS = [
  {name:'Bmaj7(♯11)',  scaleName:'B Lydian',            scale:[11,1,3,5,6,8,10],  tones:[11,3,6,10],  voicing:[47,58,63,66,73], tension:0.15},
  {name:'Emaj7(♯11)',  scaleName:'E Lydian',            scale:[4,6,8,10,11,1,3],  tones:[4,8,11,3],   voicing:[40,56,63,70,75], tension:0.18},
 ]},
-{name:'Noir', chords:[
+{name:'Noir', barsPerChord:2, chords:[
  {name:'Cmin(maj7)',  scaleName:'C Melodic Minor',     scale:[0,2,3,5,7,9,11],   tones:[0,3,7,11],   voicing:[36,51,59,62,67], tension:0.55},
  {name:'Dm7(♭5)',     scaleName:'D Locrian',           scale:[2,3,5,7,8,10,0],   tones:[2,5,8,0],    voicing:[38,48,53,56,63], tension:0.70},
  {name:'G7alt',       scaleName:'G Altered',           scale:[7,8,10,11,1,3,5],  tones:[7,11,5],     voicing:[43,53,59,63,68], tension:0.90},
@@ -408,7 +587,7 @@ const PROGRESSIONS = [
  {name:'A♭maj7(♯11)', scaleName:'A♭ Lydian',           scale:[8,10,0,2,3,5,7],   tones:[8,0,3,7],    voicing:[44,55,60,62,70], tension:0.60},
  {name:'G7(♭13)',     scaleName:'G Mixolydian ♭13',    scale:[7,9,11,0,2,3,5],   tones:[7,11,5,3],   voicing:[43,53,59,63,69], tension:0.80},
 ]},
-{name:'Pedal', chords:[   // static modal vamp — one pedal (D), only the upper structure shifts
+{name:'Pedal', barsPerChord:2, chords:[   // static modal vamp — one pedal (D), only the upper structure shifts
  {name:'Dm11',       scaleName:'D Dorian',          scale:[2,4,5,7,9,11,0],  tones:[2,5,9,0],  voicing:[38,57,60,64,67], tension:0.22},
  {name:'Dmaj9(♯11)', scaleName:'D Lydian',          scale:[2,4,6,8,9,11,1],  tones:[2,6,9,1],  voicing:[38,52,57,61,66], tension:0.30},
  {name:'D13',        scaleName:'D Mixolydian',      scale:[2,4,6,7,9,11,0],  tones:[2,6,9,0],  voicing:[38,54,60,64,71], tension:0.45},
@@ -416,7 +595,7 @@ const PROGRESSIONS = [
  {name:'Dm(maj7)',   scaleName:'D Melodic Minor',   scale:[2,4,5,7,9,11,1],  tones:[2,5,9,1],  voicing:[38,53,57,61,64], tension:0.55},
  {name:'D11sus',     scaleName:'D Dorian',          scale:[2,4,5,7,9,11,0],  tones:[2,7,9,0],  voicing:[38,55,57,60,64], tension:0.20},
 ]},
-{name:'Abyss', chords:[   // dark chromatic ascent — dim/aug/altered over Locrian-like rising bass
+{name:'Abyss', barsPerChord:2, chords:[   // dark chromatic ascent — dim/aug/altered over Locrian-like rising bass
  {name:'Cmin(maj7)',   scaleName:'C Melodic Minor',      scale:[0,2,3,5,7,9,11],   tones:[0,3,7,11],  voicing:[36,51,59,62,67], tension:0.55},
  {name:'C♯dim(maj7)',  scaleName:'C♯ Diminished (W–H)',  scale:[1,3,4,6,7,9,10,0], tones:[1,4,7,0],   voicing:[37,52,55,60,67], tension:0.80},
  {name:'Dm7(♭5)',      scaleName:'D Locrian',            scale:[2,3,5,7,8,10,0],   tones:[2,5,8,0],   voicing:[38,48,53,56,63], tension:0.70},
@@ -426,7 +605,7 @@ const PROGRESSIONS = [
  {name:'F♯dim(maj7)',  scaleName:'F♯ Diminished (W–H)',  scale:[6,8,9,11,0,2,3,5], tones:[6,9,0,5],   voicing:[42,57,60,65,72], tension:0.80},
  {name:'G7alt',        scaleName:'G Altered',            scale:[7,8,10,11,1,3,5],  tones:[7,11,5],    voicing:[43,53,59,63,68], tension:0.90},
 ]},
-{name:'Ember', chords:[   // earthy & bluesy — dominant-7th driven, soulful and grounded
+{name:'Ember', barsPerChord:2, chords:[   // earthy & bluesy — dominant-7th driven, soulful and grounded
  {name:'F7(♯9)',     scaleName:'F Dominant blues',  scale:[5,7,8,9,0,2,3],   tones:[5,9,0,3],  voicing:[41,51,57,63,68], tension:0.60},
  {name:'B♭13',       scaleName:'B♭ Mixolydian',     scale:[10,0,2,3,5,7,8],  tones:[10,2,5,8], voicing:[46,56,62,65,67], tension:0.50},
  {name:'F7',         scaleName:'F Mixolydian',      scale:[5,7,9,10,0,2,3],  tones:[5,9,0,3],  voicing:[41,51,57,60,65], tension:0.45},
@@ -434,9 +613,11 @@ const PROGRESSIONS = [
  {name:'C7(♭13)',    scaleName:'C Mixolydian ♭13',  scale:[0,2,4,5,7,8,10],  tones:[0,4,7,10], voicing:[36,46,52,58,68], tension:0.80},
  {name:'A♭13(♯11)',  scaleName:'A♭ Lydian Dominant',scale:[8,10,0,2,3,5,6],  tones:[8,0,3,6],  voicing:[44,54,60,62,66], tension:0.62},
 ]},
+{name:'Custom', barsPerChord:1, chords: parseLeadSheet(CUSTOM_DEFAULT)},
 ];
 let progIdx = CONFIG.startProgression;
 let CHORDS = PROGRESSIONS[progIdx].chords;
+function chordBars(){ return PROGRESSIONS[progIdx].barsPerChord || CONFIG.chordChangeEveryBars; }
 
 /* ---- small helpers ---- */
 const rand  = (a,b)=>a+Math.random()*(b-a);
@@ -466,7 +647,7 @@ let fillAtBeat=-1;      // a drum fill is queued for this absolute beat (down-fl
 /* ================================================================
    AUDIO ENGINE — master bus, compressor, lush reverb, motif delay.
    ================================================================ */
-let AC=null, master, reverbSend, dryGain, delaySend;
+let AC=null, master, outGate, reverbSend, dryGain, delaySend;
 let bandDry=null, bandRev=null, noiseBuf=null;
 let leadInput=null, leadDrive=null;     // lead bus + its saturation drive node
 let leadPost=null, leadRevSend=null, leadDlySend=null;  // lead output + its own reverb/delay sends (per-timbre)
@@ -485,7 +666,8 @@ function buildAudio(){
   master = AC.createGain(); master.gain.value = CONFIG.masterGain;
   const comp = AC.createDynamicsCompressor();
   comp.threshold.value=-18; comp.knee.value=24; comp.ratio.value=3;
-  master.connect(comp); comp.connect(AC.destination);
+  outGate = AC.createGain(); outGate.gain.value = 0;
+  master.connect(comp); comp.connect(outGate); outGate.connect(AC.destination);
 
   // lush, long reverb from a generated stereo impulse — the Rosenwinkel haze
   const conv = AC.createConvolver();
@@ -571,6 +753,8 @@ function buildRecChain(){
   const silence=AC.createGain(); silence.gain.value=0;
   recProc.connect(silence); silence.connect(AC.destination);
   recProc.onaudioprocess=function(e){
+    const oL=e.outputBuffer.getChannelData(0), oR=e.outputBuffer.getChannelData(1);
+    oL.fill(0); oR.fill(0);
     if(REC.state!=='recording') return;
     const L=e.inputBuffer.getChannelData(0), R=e.inputBuffer.getChannelData(1);
     const buf=new Float32Array(L.length*2);
@@ -985,7 +1169,7 @@ function pianoComp(t, beatInBar, bar){
 /* whole-note piano chord — used only for Pad mode (playPad).
    When Piano mode is active, pianoComp handles all voicing from scheduleBeat. */
 function playPiano(c, when){
-  pianoStab(c, when, 0.75, CONFIG.chordChangeEveryBars * CONFIG.beatsPerBar * (Transport.beatDur || 60/CONFIG.bpm));
+  pianoStab(c, when, 0.75, chordBars() * CONFIG.beatsPerBar * (Transport.beatDur || 60/CONFIG.bpm));
 }
 
 let usePad=true, usePiano=true;
@@ -1271,7 +1455,7 @@ function drumsSwing(t,b,band,bar){
   if(Math.random()<more(CONFIG.ghostSnareProb)) snare(t+BEAT*(Math.random()<0.5?1/3:off/BEAT),rand(0.1,0.22)*acc);
   if(Math.random()<more(CONFIG.compAccentProb)) snare(t+(Math.random()<0.5?0:off),rand(0.4,0.6)*acc);
   if(b===0) kick(j(),lerp(0.2,0.3,E));                                        // beat 1 kick — always present
-  { const chg = bar>0 && bar%CONFIG.chordChangeEveryBars===0;            // chord-change bar?
+  { const chg = bar>0 && bar%chordBars()===0;            // chord-change bar?
     if(b===0 && Math.random()<(chg?0.25:0.03)) crash(j(),rand(0.12,0.2)); }
   if(b===2&&Math.random()<lerp(0,0.35,E)) kick(j(),0.18);
   if(Math.random()<more(CONFIG.kickPushProb)) kick(t+off,rand(0.22,0.36));
@@ -1319,7 +1503,7 @@ function drumsBebop(t,b,band,bar){
     if(backbeat) hat(j(), hv*acc); }
   if(Math.random()<lerp(0.04,0.15,E)) snare(t+(Math.random()<0.5?0:off),rand(0.3,0.55)*acc);
   if(b===0) kick(j(),0.16);
-  { const chg = bar>0 && bar%CONFIG.chordChangeEveryBars===0;
+  { const chg = bar>0 && bar%chordBars()===0;
     if(b===0 && Math.random()<(chg?0.25:0.03)) crash(j(),rand(0.1,0.18)); }
 
   if(band==='burn'){
@@ -1345,7 +1529,7 @@ function drumsBossa(t,b,band,bar){
   if(Math.random()<0.85) hat(t+BEAT*0.5+rand(-0.003,0.003),0.18*acc);  // &'s always softer
   if(b===1||b===3) rimClick(j(),0.7*acc);
   if(b===0) kick(j(),0.25);
-  { const chg = bar>0 && bar%CONFIG.chordChangeEveryBars===0;
+  { const chg = bar>0 && bar%chordBars()===0;
     if(b===0 && Math.random()<(chg?0.25:0.03)) crash(j(),rand(0.1,0.16)); }
   if(b===1 && Math.random()<0.7) kick(t+BEAT*0.5+rand(-0.003,0.003),0.18);
   if(Math.random()<0.08) snare(t+BEAT*0.5,rand(0.08,0.15)*acc);
@@ -1485,7 +1669,7 @@ function drumsWaltz(t,b,band,bar){
   if(b===2) hat(j(),0.2*acc);                                    // beat 3 hat — softer
   if(b!==0 && Math.random()<lerp(0.03,0.10,E)) snare(t+off,rand(0.06,0.14)*acc);
   if(b===0) kick(j(),0.2);
-  { const chg = bar>0 && bar%CONFIG.chordChangeEveryBars===0;
+  { const chg = bar>0 && bar%chordBars()===0;
     if(b===0 && Math.random()<(chg?0.25:0.03)) crash(j(),rand(0.1,0.16)); }
   if(b===2 && Math.random()<lerp(0,0.25,E)) kick(j(),0.14);
 
@@ -1662,7 +1846,7 @@ const Transport = {
       if(plb>0){
         const nextBar=bar+1;
         const beatsLeft=CONFIG.beatsPerBar-beatInBar;    // beats until next bar boundary
-        if(beatsLeft===plb && nextBar>0 && nextBar%CONFIG.chordChangeEveryBars===0){
+        if(beatsLeft===plb && nextBar>0 && nextBar%chordBars()===0){
           // peek at the upcoming chord
           let upcoming=null;
           if(pendingProg!==null && !pivotChord){
@@ -1696,7 +1880,7 @@ const Transport = {
     BandBrain.decide(bar);
 
     // chord changes (and the progression transition) land on chord-change boundaries
-    if(bar>0 && bar%CONFIG.chordChangeEveryBars===0){
+    if(bar>0 && bar%chordBars()===0){
       if(pendingProg!==null && !pivotChord){
         // step 1: a dominant preparing the destination's first chord
         const destRoot=PROGRESSIONS[pendingProg].chords[0].tones[0];
@@ -1711,8 +1895,9 @@ const Transport = {
         if(!(style.padLeadBeats>0)) playChordVoicing(CHORDS[0],t);
         syncProg();
       }else{
+        const prev=chord;
         advanceChord(t);                                 // ordinary chord drift
-        if(!(style.padLeadBeats>0)) playChordVoicing(chord,t);
+        if(chord!==prev && !(style.padLeadBeats>0)) playChordVoicing(chord,t);
       }
     }
 
@@ -2227,10 +2412,10 @@ function xToProgIndex(x){                                   // finger X → prog
   if(x<x0 || x>x0+w) return -1;                            // outer margins (left/right) = no selection
   return clamp(Math.floor((x-x0)/(w/n)),0,n-1);
 }
-function commitProgression(i){
-  if(i===progIdx && pivotChord===null) { dbg('PROG = '+PROGRESSIONS[i].name); return; } // already here
+function commitProgression(i,force){
+  if(!force && i===progIdx && pivotChord===null) { dbg('PROG = '+PROGRESSIONS[i].name); return; }
   pendingProg=i; tutorialNotify('swipe');                  // the V7 pivot fires at the next chord boundary
-  const span=CONFIG.chordChangeEveryBars*CONFIG.beatsPerBar, P=beatPos();
+  const span=chordBars()*CONFIG.beatsPerBar, P=beatPos();
   const pivotBeat=Math.ceil((P+0.001)/span)*span;          // next boundary = pivot starts
   const arrival=pivotBeat+span;                             // when the destination chord lands (band)
   // match the full leadChord lag from applyChord: grooveOffset + leadLagBars
@@ -2581,7 +2766,12 @@ function start(){
   // starting the scheduler against a still-suspended clock (currentTime stuck at 0) was what
   // sometimes left the band silent until a second tap. We wait for the resume, with a fallback.
   let begun=false;
-  const begin=()=>{ if(begun) return; begun=true; const t0=AC.currentTime+0.06; setChord(0,t0); playChordVoicing(CHORDS[0],t0); Transport.start(); };
+  const begin=()=>{
+    if(begun) return; begun=true;
+    const t0=AC.currentTime+0.15;
+    outGate.gain.setTargetAtTime(1, t0, 0.06);
+    setChord(0,t0); playChordVoicing(CHORDS[0],t0); Transport.start();
+  };
   if(AC.state==='running') begin();
   else { AC.resume().then(begin).catch(begin); setTimeout(begin,300); }   // fallback if resume never settles
   // keep the audio alive: if the context is ever interrupted/suspended (tab switch, iOS audio
@@ -2703,25 +2893,41 @@ syncBpm();
 const progGrid=document.getElementById('prog-grid');
 const progOpts=[];
 (function buildProgGrid(){
-  for(let r=0;r<2;r++){
-    const row=document.createElement('span');
-    row.className='prow';
-    for(let c=0;c<4;c++){
-      const i=r*4+c;
-      const el=document.createElement('span');
-      el.className='opt'+(i>=PROGRESSIONS.length?' empty':'');
-      el.textContent=i<PROGRESSIONS.length?PROGRESSIONS[i].name:'';
-      if(i<PROGRESSIONS.length) el.addEventListener('click',e=>{
-        e.stopPropagation();
-        if(!AC) return;
-        commitProgression(i);
-        syncProg();
-      });
-      row.appendChild(el);
-      progOpts.push(el);
-    }
-    progGrid.appendChild(row);
+  const row1=document.createElement('span');
+  row1.className='prow';
+  for(let c=0;c<4;c++){
+    const el=document.createElement('span');
+    el.className='opt';
+    el.textContent=PROGRESSIONS[c].name;
+    el.addEventListener('click',(function(i){return function(e){
+      e.stopPropagation(); if(!AC) return; commitProgression(i); syncProg();
+    };})(c));
+    row1.appendChild(el);
+    progOpts.push(el);
   }
+  progGrid.appendChild(row1);
+  const row2=document.createElement('span');
+  row2.className='prow2';
+  const prow=document.createElement('span');
+  prow.className='prow';
+  for(let c=0;c<3;c++){
+    const i=4+c;
+    const el=document.createElement('span');
+    el.className='opt';
+    el.textContent=PROGRESSIONS[i].name;
+    el.addEventListener('click',(function(idx){return function(e){
+      e.stopPropagation(); if(!AC) return; commitProgression(idx); syncProg();
+    };})(i));
+    prow.appendChild(el);
+    progOpts.push(el);
+  }
+  row2.appendChild(prow);
+  const editBtn=document.createElement('span');
+  editBtn.className='ed-opt';
+  editBtn.textContent='Edit';
+  editBtn.addEventListener('click',e=>{ e.stopPropagation(); openChordEditor(); });
+  row2.appendChild(editBtn);
+  progGrid.appendChild(row2);
 })();
 function syncProg(){
   progOpts.forEach((el,i)=>{
@@ -2732,6 +2938,41 @@ function syncProg(){
     el.classList.toggle('pending', isPending);
   });
 }
+// Chord editor overlay
+const editorEl=document.getElementById('chord-editor');
+const edInput=document.getElementById('ed-input');
+const edErr=document.getElementById('ed-err');
+let customText=CUSTOM_DEFAULT;
+function openChordEditor(){
+  edInput.value=customText;
+  edErr.textContent='';
+  editorEl.classList.add('open');
+  edInput.focus();
+}
+function closeChordEditor(){ editorEl.classList.remove('open'); }
+document.getElementById('ed-clear').addEventListener('click',e=>{
+  e.stopPropagation(); e.preventDefault(); edInput.value=''; edErr.textContent='';
+});
+document.getElementById('ed-cancel').addEventListener('click',e=>{
+  e.stopPropagation(); closeChordEditor();
+});
+document.getElementById('ed-save').addEventListener('click',e=>{
+  e.stopPropagation();
+  const text=edInput.value.trim();
+  const newChords=text ? parseLeadSheet(text) : parseLeadSheet(CUSTOM_DEFAULT);
+  if(text && (!newChords||newChords.length===0)){ edErr.textContent='Could not parse chords. Check symbols.'; return; }
+  customText=text||CUSTOM_DEFAULT;
+  if(!text) edInput.value=CUSTOM_DEFAULT;
+  PROGRESSIONS[CUSTOM_PROG_IDX].chords=newChords;
+  closeChordEditor();
+  if(!AC) return;
+  const onCustom=progIdx===CUSTOM_PROG_IDX;
+  commitProgression(CUSTOM_PROG_IDX, onCustom);
+  syncProg();
+});
+edInput.addEventListener('click',e=>e.stopPropagation());
+edInput.addEventListener('pointerdown',e=>e.stopPropagation());
+editorEl.addEventListener('pointerdown',e=>e.stopPropagation());
 // Chord tone selector (Pad / Piano)
 const chordPadBtn=document.getElementById('chord-pad'), chordPianoBtn=document.getElementById('chord-piano');
 function syncChord(){ chordPadBtn.classList.toggle('on',usePad); chordPianoBtn.classList.toggle('on',usePiano); }
