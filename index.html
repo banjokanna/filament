@@ -384,7 +384,8 @@ const CONFIG = {
     HOLD_MS: 280,          // near-still contact this long → hold (間)
     HOLD_DRIFT: 16,        // px of wander still counted as "holding"
     HSWIPE_MIN_DISP: 64,   // horizontal travel (px) → enter the progression SCRUB selector
-    selectorBand: 0.6,     // selector spans this CENTRED fraction of the width; the outer margins are dead zones
+    selectorLeft: 0.2,     // selector band starts at this fraction from the left edge
+    selectorWidth: 0.7,    // selector band spans this fraction of the screen width
     TAP_MAX_MS: 200,       // a quick, near-still touch (no flick/hold/drag) → a comp stab
     TAP_MAX_DISP: 20,      // …with at most this much travel
   },
@@ -2408,8 +2409,8 @@ function leftUp(e){
 
 /* ---- gesture effects (the band's full interpretation arrives in phase 4) ---- */
 function xToProgIndex(x){                                   // finger X → progression segment, or -1 (dead zone)
-  const n=PROGRESSIONS.length, w=CONFIG.leftHand.selectorBand*W, x0=(W-w)/2;  // centred band
-  if(x<x0 || x>x0+w) return -1;                            // outer margins (left/right) = no selection
+  const n=PROGRESSIONS.length, x0=CONFIG.leftHand.selectorLeft*W, w=CONFIG.leftHand.selectorWidth*W;
+  if(x<x0 || x>x0+w) return -1;
   return clamp(Math.floor((x-x0)/(w/n)),0,n-1);
 }
 function commitProgression(i,force){
