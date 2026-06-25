@@ -60,16 +60,16 @@
   }
   #settings{
     position:fixed;inset:0;z-index:9;display:none;
-    flex-direction:column;align-items:center;justify-content:center;gap:26px;
+    flex-direction:column;align-items:center;justify-content:center;gap:18px;
     background:transparent;
-    color:var(--gold);text-align:center;padding:32px;
+    color:var(--gold);text-align:center;padding:112px 32px 32px;
   }
   #settings.open{display:flex;}
   .srow{
     display:flex;align-items:center;justify-content:space-between;
     width:min(82vw,360px);gap:24px;
     font-size:11px;letter-spacing:.18em;color:rgba(232,213,163,.85);
-    padding:9px 2px;
+    padding:7px 2px;
   }
   /* all right-side controls share one width so they line up (matches the EN|JP segment) */
   .srow .tog,.srow .seg{box-sizing:border-box;width:156px;}
@@ -90,6 +90,19 @@
   .srow .seg .opt.on{color:var(--ink);background:var(--gold);}
   .srow .tog:focus{outline:none;}
   .srow .seg .opt.off{color:rgba(232,213,163,.2);pointer-events:none;}
+  /* 4×2 grid for progression buttons — two 4-cell rows with a gap between */
+  .srow .pgrid{box-sizing:border-box;width:156px;display:flex;flex-direction:column;gap:6px;}
+  .srow .pgrid .prow{display:flex;border:1px solid rgba(232,213,163,.3);border-radius:2px;overflow:hidden;
+    background:rgba(6,7,16,.82);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
+  .srow .pgrid .opt{
+    flex:1;font-size:8px;letter-spacing:.08em;color:rgba(232,213,163,.5);
+    padding:4px 0;cursor:pointer;transition:all .2s;text-align:center;
+  }
+  .srow .pgrid .opt+.opt{border-left:1px solid rgba(232,213,163,.3);}
+  .srow .pgrid .opt.on{color:var(--ink);background:var(--gold);}
+  .srow .pgrid .opt.pending{animation:progBlink .5s ease-in-out infinite;}
+  .srow .pgrid .opt.empty{pointer-events:none;color:transparent;}
+  @keyframes progBlink{0%,100%{color:var(--ink);background:var(--gold)}50%{color:rgba(232,213,163,.5);background:transparent}}
   @keyframes recPulse{0%,100%{opacity:1}50%{opacity:.4}}
 
   /* ---------- interactive tutorial — a top card; the canvas stays playable beneath it ---------- */
@@ -168,6 +181,8 @@
 <div id="settings">
   <div class="srow"><span>Tutorial</span><span class="seg"><span class="opt" id="tut-en">EN</span><span class="opt" id="tut-jp">JP</span></span></div>
   <div class="srow"><span>Style</span><span class="seg" id="style-seg"><span class="opt on" id="style-0">Sw</span><span class="opt" id="style-1">Bb</span><span class="opt" id="style-2">Bo</span><span class="opt" id="style-3">Wz</span></span></div>
+  <div class="srow"><span>BPM</span><span class="seg"><input type="text" inputmode="numeric" id="bpm-input" class="opt on" style="width:50px;border:none;background:transparent;color:inherit;text-align:center;font:inherit;padding:4px 0;"><span class="opt" id="bpm-reset">Reset</span></span></div>
+  <div class="srow"><span>Prog</span><span class="pgrid" id="prog-grid"></span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
   <div class="srow"><span>Chord</span><span class="seg"><span class="opt on" id="chord-pad">Pad</span><span class="opt on" id="chord-piano">Piano</span></span></div>
   <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
@@ -359,7 +374,7 @@ let timbreIdx=0, timbre=TIMBRES[0];
    A second modal-pedal pool and the Coltrane pool arrive in phase 3.
    ================================================================ */
 const PROGRESSIONS = [
-{name:'Floating', chords:[
+{name:'Float', chords:[
  {name:'Cmaj7(♯11)',  scaleName:'C Lydian',            scale:[0,2,4,6,7,9,11],   tones:[0,4,7,11],   voicing:[36,52,59,66,74], tension:0.20},
  {name:'E♭maj7(♯11)', scaleName:'E♭ Lydian',           scale:[3,5,7,9,10,0,2],   tones:[3,7,10,2],   voicing:[39,55,62,69,74], tension:0.30},
  {name:'Gmaj7(♯5)',   scaleName:'G Lydian Augmented',  scale:[7,9,11,1,3,4,6],   tones:[7,11,3,6],   voicing:[43,54,59,63,69], tension:0.55},
@@ -373,7 +388,7 @@ const PROGRESSIONS = [
  {name:'Fmaj7(♯5)',   scaleName:'F Lydian Augmented',  scale:[5,7,9,11,1,2,4],   tones:[5,9,1,4],    voicing:[41,52,57,61,67], tension:0.60},
  {name:'D♭maj7(♯11)', scaleName:'D♭ Lydian',           scale:[1,3,5,7,8,10,0],   tones:[1,5,8,0],    voicing:[37,53,60,67,72], tension:0.25},
 ]},
-{name:'Horizon', chords:[
+{name:'Vista', chords:[
  {name:'Gmaj9',       scaleName:'G Lydian',            scale:[7,9,11,1,2,4,6],   tones:[7,11,2,6],   voicing:[43,54,59,64,69], tension:0.10},
  {name:'Emin9',       scaleName:'E Dorian',            scale:[4,6,7,9,11,1,2],   tones:[4,7,11,2],   voicing:[40,50,55,59,66], tension:0.20},
  {name:'Amin11',      scaleName:'A Dorian',            scale:[9,11,0,2,4,6,7],   tones:[9,0,4,7],    voicing:[45,55,60,64,71], tension:0.25},
@@ -1694,6 +1709,7 @@ const Transport = {
         progIdx=pendingProg; CHORDS=PROGRESSIONS[progIdx].chords;
         pendingProg=null; pivotChord=null; chordIdx=0; setChord(0,t);
         if(!(style.padLeadBeats>0)) playChordVoicing(CHORDS[0],t);
+        syncProg();
       }else{
         advanceChord(t);                                 // ordinary chord drift
         if(!(style.padLeadBeats>0)) playChordVoicing(chord,t);
@@ -2226,6 +2242,7 @@ function commitProgression(i){
   fillAtBeat=Math.round(gaugeTo)-1;                        // announce the change NOW: fill the beat before it lands
   fillManual=false;                                        // this fill belongs to the harmony move (no amber accent)
   dbg('PROG → '+PROGRESSIONS[i].name);
+  syncProg();
 }
 function beatPos(){                                         // continuous beat position (for the transition gauge)
   if(!AC||!Transport.beatDur) return 0;
@@ -2614,7 +2631,7 @@ function syncHud(){
 function settingsOpen(){ return settingsEl.classList.contains('open'); }
 function openSettings(){
   if(tutActive) endTutorial();
-  syncHud(); syncRec(); settingsEl.classList.add('open');
+  syncHud(); syncBpm(); syncProg(); syncRec(); settingsEl.classList.add('open');
 }
 function closeSettings(){ settingsEl.classList.remove('open'); }
 document.getElementById('gear').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();openSettings();});
@@ -2645,22 +2662,76 @@ function switchStyle(i){
     padVoices=[];
     if(lead.voice){ try{releaseLead(lead.voice);}catch(_){} lead.voice=null; lead.pid=null; }
     setStyle(i);
+    syncBpm();
     setTimeout(()=>{
       Transport.beat=0; Transport.nextBeatTime=AC.currentTime+0.08;
       bassBusyBeat=0; fillAtBeat=-1; fillManual=false;
+      if(pendingProg!==null){ progIdx=pendingProg; CHORDS=PROGRESSIONS[progIdx].chords; }
       pendingProg=null; pivotChord=null; gaugeFrom=0; gaugeTo=0;
       chordIdx=0;
       setChord(0, AC.currentTime+0.06);
       playChordVoicing(CHORDS[0], AC.currentTime+0.06);
       bassCur=lowNear(chord.tones[0],40);
       BandBrain.reset();
+      syncProg();
       if(bandDry) bandDry.gain.setValueAtTime(lerp(0.62,1.12,BandBrain.effDrive),AC.currentTime);
       master.gain.setTargetAtTime(CONFIG.masterGain, AC.currentTime, fadeIn/4);
       Transport.start();
     }, gap*1000);
   }, fadeOut*1000);
 }
-styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); switchStyle(i); syncStyle(); }));
+styleOpts.forEach((el,i)=>el.addEventListener('click',e=>{ e.stopPropagation(); switchStyle(i); syncStyle(); syncBpm(); }));
+// BPM input — editable, clamped to 60–300
+const bpmInput=document.getElementById('bpm-input');
+const bpmReset=document.getElementById('bpm-reset');
+function syncBpm(){ bpmInput.value=CONFIG.bpm; }
+function applyBpm(v){
+  const n=Math.round(Number(v));
+  if(isNaN(n)) { syncBpm(); return; }
+  const clamped=Math.max(60,Math.min(300,n));
+  CONFIG.bpm=clamped;
+  if(Transport.beatDur) Transport.beatDur=60/clamped;
+  syncBpm();
+}
+bpmInput.addEventListener('click',e=>e.stopPropagation());
+bpmInput.addEventListener('change',e=>{ applyBpm(e.target.value); });
+bpmInput.addEventListener('blur',()=>syncBpm());
+bpmInput.addEventListener('keydown',e=>{ if(e.key==='Enter'){ applyBpm(e.target.value); e.target.blur(); } });
+bpmReset.addEventListener('click',e=>{ e.stopPropagation(); applyBpm(style.bpm); });
+syncBpm();
+// Progression grid — 4×2, triggers commitProgression like left-hand scrub
+const progGrid=document.getElementById('prog-grid');
+const progOpts=[];
+(function buildProgGrid(){
+  for(let r=0;r<2;r++){
+    const row=document.createElement('span');
+    row.className='prow';
+    for(let c=0;c<4;c++){
+      const i=r*4+c;
+      const el=document.createElement('span');
+      el.className='opt'+(i>=PROGRESSIONS.length?' empty':'');
+      el.textContent=i<PROGRESSIONS.length?PROGRESSIONS[i].name:'';
+      if(i<PROGRESSIONS.length) el.addEventListener('click',e=>{
+        e.stopPropagation();
+        if(!AC) return;
+        commitProgression(i);
+        syncProg();
+      });
+      row.appendChild(el);
+      progOpts.push(el);
+    }
+    progGrid.appendChild(row);
+  }
+})();
+function syncProg(){
+  progOpts.forEach((el,i)=>{
+    if(i>=PROGRESSIONS.length) return;
+    const isCurrent = i===progIdx && pendingProg===null;
+    const isPending = pendingProg===i;
+    el.classList.toggle('on', isCurrent);
+    el.classList.toggle('pending', isPending);
+  });
+}
 // Chord tone selector (Pad / Piano)
 const chordPadBtn=document.getElementById('chord-pad'), chordPianoBtn=document.getElementById('chord-piano');
 function syncChord(){ chordPadBtn.classList.toggle('on',usePad); chordPianoBtn.classList.toggle('on',usePiano); }
@@ -2688,7 +2759,7 @@ function syncRec(){
   recWav.classList.toggle('off', REC.state!=='stopped');
   recMid.classList.toggle('off', REC.state!=='stopped');
 }
-syncHud(); syncVoice(); syncStyle(); syncChord();   // initial state
+syncHud(); syncVoice(); syncStyle(); syncProg(); syncChord();   // initial state
 
 /* ---------------- interactive tutorial ----------------
    Launched from the settings panel. A top card names a gesture and waits; the band
