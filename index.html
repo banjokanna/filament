@@ -23,6 +23,7 @@
   }
   /* the night is playable everywhere; no controls float over it (明示的UIは出さない) */
   #stage{position:fixed;inset:0;display:block;touch-action:none;cursor:default;}
+  #overlay{position:fixed;inset:0;display:block;pointer-events:none;z-index:1;}
 
   /* debug HUD — top-right, gated by CONFIG.debug; not part of the real instrument */
   #dbg{
@@ -227,6 +228,7 @@
 </head>
 <body>
 <canvas id="stage"></canvas>
+<canvas id="overlay"></canvas>
 <div id="dbg"></div>
 <div id="gear" title="Settings"></div>
 <div id="settings">
@@ -331,13 +333,13 @@ const CONFIG = {
 
   // ---- RightHand — the lead is "声" (a voice): sustained, gliding ----
   // (per-voice tone — osc/filter/vibrato/attack/release/saturation/sends — lives in TIMBRES)
-  leadLo: 38, leadHi: 96,       // playable midi range mapped to the vertical axis
+  leadLo: 44, leadHi: 90,       // playable midi range mapped to the vertical axis
   leadMaxVoices: 6,             // cap on overlapping lead voices (rapid-tap tails) — steal oldest
                                 //    (lead is monophonic; normal play never reaches this — transparent)
   leadPortamento: 0.06,         // glide time-constant for slides (legato)
   leadLeapSemitones: 3,         // a jump of >= this, made fast, re-articulates…
   leadLeapSpeed: 0.30,          // px/ms — …above this finger speed (else it glides)
-  chordToneWeight: 2.0,         // snap bias toward chord tones (vs other scale notes)
+  chordToneWeight: 1.0,         // snap bias toward chord tones (vs other scale notes)
   snapWaver: 0.5,               // tiny random humanisation in the snap choice
 
   // ---- leadIntensity — finger speed + register (+ pressure), 0..1 → BandBrain ----
@@ -1936,7 +1938,7 @@ function morphedScale(){
     tones: leadChord.tones.map(n=>(n+shift+120)%12),
   };
 }
-function snapToAvailable(target){
+function snapToAvailable(target,tonesOnly){
   const lo=CONFIG.leadLo, hi=CONFIG.leadHi;
   const {scale,tones} = morphedScale();
   const inScale = m=>scale.includes(((m%12)+12)%12);
@@ -1945,6 +1947,7 @@ function snapToAvailable(target){
   for(let m=Math.round(target)-4;m<=Math.round(target)+4;m++){
     if(m<lo||m>hi) continue;
     if(!inScale(m)) continue;
+    if(tonesOnly&&!isTone(m)) continue;
     let s=-Math.abs(target-m)*1.1;
     if(isTone(m)) s+=CONFIG.chordToneWeight;
     s+=Math.random()*CONFIG.snapWaver;
@@ -2031,7 +2034,7 @@ function releaseLead(v){
   v.stopAt=end;
 }
 
-const lead={ pid:null, x:0, y:0, downX:0, downY:0, lastT:0, t0:0, speed:0, hSpeed:0, pressure:0, voice:null };
+const lead={ pid:null, x:0, y:0, downX:0, downY:0, lastT:0, t0:0, speed:0, hSpeed:0, pressure:0, voice:null, dragging:false };
 let lastLeadMidi=null;   // the most recent note — held in the HUD after the finger lifts
 let flickCooldownUntil=0;// while a right-hand flick plays out, normal note logic is suppressed
 const leadVoices=[];     // every still-ringing lead voice (active + decaying tails), for the polyphony cap
@@ -2051,6 +2054,7 @@ function leadDown(e){
   midiLog(0,0x90,midi,100);
   breakTrail(); pushTrail(e.clientX,e.clientY);
   ripple(x01,y01,midi, outness!==0&&!inScaleLead(midi)?OUT_COL:null);
+  pluckFilament(midi,x01,1.0);
   if(outness!==0) tutorialNotify('out');
 }
 function leadMove(e){
@@ -2058,6 +2062,7 @@ function leadMove(e){
   const now=performance.now(), dt=Math.max(now-lead.lastT,1);
   const dx=e.clientX-lead.x, dy=e.clientY-lead.y;
   lead.speed=Math.hypot(dx,dy)/dt; lead.hSpeed=Math.abs(dx)/dt;
+  if(!lead.dragging && Math.hypot(e.clientX-lead.downX,e.clientY-lead.downY)>8) lead.dragging=true;
   lead.pressure=e.pressure||0;
   lead.x=e.clientX; lead.y=e.clientY; lead.lastT=now;
 
@@ -2080,7 +2085,7 @@ function leadMove(e){
   pushTrail(e.clientX,e.clientY);                          // normal play only — the sung line
 
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
-  const midi=snapToAvailable(yToMidi(y01));
+  const midi=snapToAvailable(yToMidi(y01),true);
   lastLeadMidi=midi;
   if(midi!==lead.voice.midi){
     tutorialNotify('voice');
@@ -2093,6 +2098,7 @@ function leadMove(e){
       REC.leadBase=midi;
       midiLog(0,0x90,midi,100);
       rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi, outness!==0&&!inScaleLead(midi)?OUT_COL:null);
+      pluckFilament(midi,x01,0.9);
     } else {
       // MIDI: legato glide — pitch bend, but rearticulate if drift exceeds 4 semitones
       // to prevent abnormally long notes during continuous sweeps
@@ -2109,6 +2115,7 @@ function leadMove(e){
         }
       }
       glideLeadTo(lead.voice,midi);
+      pluckFilament(midi,x01,0.5);
     }
   }
   // timbre follows horizontal POSITION (left = round/dark, right = bright/edgy),
@@ -2125,7 +2132,7 @@ function leadUp(e){
   if(lead.pid!==e.pointerId) return;
   if(REC.leadBase!==null){midiLog(0,0xE0,0,64);midiLog(0,0x80,REC.leadBase,0);REC.leadBase=null;}
   if(lead.voice) releaseLead(lead.voice);
-  lead.voice=null; lead.pid=null; lead.speed=0; lead.hSpeed=0;
+  lead.voice=null; lead.pid=null; lead.speed=0; lead.hSpeed=0; lead.dragging=false;
 }
 
 /* leadIntensity = finger speed + register + note-onset activity (+ pressure).
@@ -2189,6 +2196,7 @@ function flickVisuals(notes,landing){
   notes.forEach(m=>{
     const col = m===landing ? null : OUT_COL;
     ripple(x01,clamp((CONFIG.leadHi-m)/(CONFIG.leadHi-CONFIG.leadLo),0,1),m,col);
+    pluckFilament(m,x01,0.8);
   });
   burstParticles(lead.x,lead.y,OUT_COL,26);
 }
@@ -2219,6 +2227,7 @@ function flickSingle(dir){
   // the single note IS the outside note → cyan ring + particle burst, no trail
   clearTrail(); ripples.length=0;
   ripple(clamp(lead.x/W,0,1),clamp((CONFIG.leadHi-out)/(CONFIG.leadHi-CONFIG.leadLo),0,1),out,OUT_COL);
+  pluckFilament(out,clamp(lead.x/W,0,1),1.0);
   burstParticles(lead.x,lead.y,OUT_COL,26);
   dbg('R-SINGLE '+(dir>0?'▲':'▼')+' '+midiName(out));
 }
@@ -2337,12 +2346,11 @@ function leftMove(e){
     // if a lead voice is sustaining, glide it to the morphed pitch
     if(outness!==prev && lead.voice && lead.pid!==null){
       const y01=clamp(lead.y/H,0,1);
-      const midi=snapToAvailable(yToMidi(y01));
+      const midi=snapToAvailable(yToMidi(y01),true);
       if(midi!==lead.voice.midi){
         const f=mtof(midi), t=AC.currentTime;
         lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
         lead.voice.o2.frequency.setTargetAtTime(f,t,0.03);
-        // MIDI: pitch bend to reflect the outness shift (rearticulate if drift > 4)
         if(REC.leadBase!==null){
           const semi=midi-REC.leadBase;
           if(Math.abs(semi)>4){
@@ -2355,6 +2363,7 @@ function leftMove(e){
         }
         lead.voice.midi=midi; lastLeadMidi=midi;
         ripple(clamp(lead.x/W,0,1),y01,midi, !inScaleLead(midi)?OUT_COL:null);
+        pluckFilament(midi,clamp(lead.x/W,0,1),0.6);
       }
     }
     dbg('OUT '+(outness>=0?'♯':'♭')+' '+outness.toFixed(2));
@@ -2384,7 +2393,7 @@ function leftUp(e){
   if(outness!==0 && lead.voice && lead.pid!==null){
     outness=0;
     const y01=clamp(lead.y/H,0,1);
-    const midi=snapToAvailable(yToMidi(y01));
+    const midi=snapToAvailable(yToMidi(y01),true);
     if(midi!==lead.voice.midi){
       const f=mtof(midi), t=AC.currentTime;
       lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
@@ -2402,6 +2411,7 @@ function leftUp(e){
       }
       lead.voice.midi=midi; lastLeadMidi=midi;
       ripple(clamp(lead.x/W,0,1),y01,midi,null);
+      pluckFilament(midi,clamp(lead.x/W,0,1),0.6);
     }
   } else { outness=0; }
   left.pid=null; left.mode='idle';
@@ -2470,16 +2480,615 @@ function firePunch(){
    chord tension and blooms softly on every beat, so you can see the
    band is alive. The signature lead-trail visuals come in phase 5.
    ================================================================ */
-const cv=document.getElementById('stage'), cx=cv.getContext('2d');
+const cv=document.getElementById('stage');
+const olCv=document.getElementById('overlay');
+const olCx=olCv.getContext('2d');
+const cx=olCx;   // alias so all existing 2D overlay code (ghost, selector, gauges, HUD) works
+
+/* ---- WebGL context (stage canvas becomes the 3D surface) ---- */
+const gl=cv.getContext('webgl2',{alpha:false,antialias:false,premultipliedAlpha:false})
+       ||cv.getContext('webgl',{alpha:false,antialias:false,premultipliedAlpha:false});
+const isWebGL2=typeof WebGL2RenderingContext!=='undefined' && gl instanceof WebGL2RenderingContext;
+
 let W=0,H=0,DPR=1;
 function resize(){
   DPR=Math.min(window.devicePixelRatio||1,2);
   W=window.innerWidth;H=window.innerHeight;
   cv.width=W*DPR;cv.height=H*DPR;
   cv.style.width=W+'px';cv.style.height=H+'px';
+  olCv.width=W*DPR;olCv.height=H*DPR;
+  olCv.style.width=W+'px';olCv.style.height=H+'px';
   cx.setTransform(DPR,0,0,DPR,0,0);
+  if(gl) resizeGL();
 }
-window.addEventListener('resize',resize);resize();
+window.addEventListener('resize',resize);
+
+/* ================================================================
+   HORIZONTAL FILAMENT ENGINE — each available note is a luminous
+   vibrating string. Chord tones glow bright; scale tones are dim.
+   Outness shifts positions and tints cool. Pluck = decaying sine.
+   ================================================================ */
+
+/* ---- Perlin noise (deterministic, no Math.random) ---- */
+const _perm=(()=>{
+  const p=new Uint8Array(512);
+  const base=[151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
+    140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,
+    0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,
+    174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,
+    158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,
+    244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,
+    169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,
+    217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,
+    227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,
+    163,70,221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,
+    113,224,232,178,185,112,104,218,246,97,228,251,34,242,193,238,210,
+    144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,
+    181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,
+    205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180];
+  for(let i=0;i<256;i++){p[i]=base[i];p[i+256]=base[i];}
+  return p;
+})();
+
+function _fade(t){return t*t*t*(t*(t*6-15)+10);}
+function _grad3(hash,x,y,z){
+  const h=hash&15;
+  const u=h<8?x:y, v=h<4?y:(h===12||h===14?x:z);
+  return ((h&1)?-u:u)+((h&2)?-v:v);
+}
+function pnoise3(x,y,z){
+  const X=Math.floor(x)&255, Y=Math.floor(y)&255, Z=Math.floor(z)&255;
+  x-=Math.floor(x); y-=Math.floor(y); z-=Math.floor(z);
+  const u=_fade(x), v=_fade(y), w=_fade(z);
+  const A=_perm[X]+Y, AA=_perm[A]+Z, AB=_perm[A+1]+Z;
+  const B=_perm[X+1]+Y, BA=_perm[B]+Z, BB=_perm[B+1]+Z;
+  return lerp(
+    lerp(lerp(_grad3(_perm[AA],x,y,z),_grad3(_perm[BA],x-1,y,z),u),
+         lerp(_grad3(_perm[AB],x,y-1,z),_grad3(_perm[BB],x-1,y-1,z),u),v),
+    lerp(lerp(_grad3(_perm[AA+1],x,y,z-1),_grad3(_perm[BA+1],x-1,y,z-1),u),
+         lerp(_grad3(_perm[AB+1],x,y-1,z-1),_grad3(_perm[BB+1],x-1,y-1,z-1),u),v),w);
+}
+function fbm3(x,y,z,oct){
+  let v=0, amp=1, freq=1, total=0;
+  for(let i=0;i<oct;i++){
+    v+=pnoise3(x*freq,y*freq,z*freq)*amp;
+    total+=amp; amp*=0.5; freq*=2;
+  }
+  return v/total;
+}
+
+/* ---- Shader sources ---- */
+const _glslVer=isWebGL2?'#version 300 es\n':'';
+const _glslIn=isWebGL2?'in':'attribute';
+const _glslOut=isWebGL2?'out':'varying';
+const _glslInF=isWebGL2?'in':'varying';
+const _glslFragDecl=isWebGL2?'out vec4 fragColor;\n':'';
+const _fragOut=isWebGL2?'fragColor':'gl_FragColor';
+
+const FILAMENT_VS=`${_glslVer}
+precision highp float;
+${_glslIn} vec3 aPos;
+${_glslIn} vec4 aCol;
+uniform mat4 uMVP;
+${_glslOut} vec4 vCol;
+void main(){
+  vCol=aCol;
+  gl_Position=uMVP*vec4(aPos,1.0);
+}`;
+
+const FILAMENT_FS=`${_glslVer}
+precision highp float;
+${_glslInF} vec4 vCol;
+${_glslFragDecl}
+void main(){
+  ${_fragOut}=vCol;
+}`;
+
+const QUAD_VS=`${_glslVer}
+precision highp float;
+${_glslIn} vec2 aPos;
+${_glslOut} vec2 vUV;
+void main(){
+  gl_Position=vec4(aPos,0.0,1.0);
+  vUV=aPos*0.5+0.5;
+}`;
+
+const BLUR_FS=`${_glslVer}
+precision highp float;
+${_glslInF} vec2 vUV;
+uniform sampler2D uTex;
+uniform vec2 uDir;
+uniform vec2 uRes;
+${_glslFragDecl}
+void main(){
+  vec2 px=uDir/uRes;
+  vec4 c=vec4(0.0);
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV-4.0*px)*0.0162;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV-3.0*px)*0.0540;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV-2.0*px)*0.1218;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV-1.0*px)*0.1954;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV       )*0.2252;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV+1.0*px)*0.1954;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV+2.0*px)*0.1218;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV+3.0*px)*0.0540;
+  c+=texture${isWebGL2?'':'2D'}(uTex,vUV+4.0*px)*0.0162;
+  ${_fragOut}=c;
+}`;
+
+const COMP_FS=`${_glslVer}
+precision highp float;
+${_glslInF} vec2 vUV;
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uBloomStr;
+${_glslFragDecl}
+void main(){
+  ${_fragOut}=texture${isWebGL2?'':'2D'}(uScene,vUV)+texture${isWebGL2?'':'2D'}(uBloom,vUV)*uBloomStr;
+}`;
+
+/* ---- WebGL helpers ---- */
+function compileShader(src,type){
+  const s=gl.createShader(type);
+  gl.shaderSource(s,src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){
+    console.error('Shader compile error:',gl.getShaderInfoLog(s),'\n',src);
+    gl.deleteShader(s); return null;
+  }
+  return s;
+}
+function linkProgram(vsSrc,fsSrc){
+  const vs=compileShader(vsSrc,gl.VERTEX_SHADER);
+  const fs=compileShader(fsSrc,gl.FRAGMENT_SHADER);
+  if(!vs||!fs) return null;
+  const p=gl.createProgram();
+  gl.attachShader(p,vs); gl.attachShader(p,fs); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)){
+    console.error('Program link error:',gl.getProgramInfoLog(p));
+    return null;
+  }
+  return p;
+}
+function createFBO(w,h){
+  const fb=gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+  const tex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  return {fb,tex,w,h};
+}
+
+/* ---- Horizontal filament data ---- */
+const HF_MAX=60;
+const HF_PTS=80;
+let hfSlots=[];
+const hfPlucks=[];
+let hfActiveCount=0;
+let hfPos=new Float32Array(HF_MAX*HF_PTS*3);
+let hfCol=new Float32Array(HF_MAX*HF_PTS*4);
+let hfGlowCol=new Float32Array(HF_MAX*HF_PTS*4);
+
+function midiToScreenY(midi){
+  return H*(1-(midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo));
+}
+function getAvailableNotes(){
+  const {scale,tones}=morphedScale();
+  const notes=[];
+  for(let m=CONFIG.leadLo;m<=CONFIG.leadHi;m++){
+    const pc=((m%12)+12)%12;
+    if(scale.includes(pc)) notes.push({midi:m, isTone:tones.includes(pc)});
+  }
+  return notes;
+}
+function pluckFilament(midi,x01,amp){
+  hfPlucks.push({midi, t0:performance.now(), x01:clamp(x01,0,1), amp:amp||1.0});
+  if(hfPlucks.length>80) hfPlucks.shift();
+}
+
+/* ---- Orthographic projection ---- */
+function mat4Ortho(l,r,b,t,n,f){
+  const m=new Float32Array(16);
+  m[0]=2/(r-l); m[5]=2/(t-b); m[10]=-2/(f-n);
+  m[12]=-(r+l)/(r-l); m[13]=-(t+b)/(t-b); m[14]=-(f+n)/(f-n); m[15]=1;
+  return m;
+}
+
+/* ---- WebGL state ---- */
+let glFilProg, glBlurProg, glCompProg;
+let glFilBuf, glQuadBuf;
+let glSceneFBO, glGlowFBO, glBloomFBO1, glBloomFBO2;
+let glUniMVP, glUniBlurTex, glUniBlurDir, glUniBlurRes;
+let glUniCompScene, glUniCompBloom, glUniCompStr;
+let glAFilPos, glAFilCol, glAQuadPos;
+
+function initGL(){
+  if(!gl) return;
+  glFilProg=linkProgram(FILAMENT_VS,FILAMENT_FS);
+  glBlurProg=linkProgram(QUAD_VS,BLUR_FS);
+  glCompProg=linkProgram(QUAD_VS,COMP_FS);
+  if(!glFilProg||!glBlurProg||!glCompProg){ console.error('WebGL shader compilation failed'); return; }
+
+  glAFilPos=gl.getAttribLocation(glFilProg,'aPos');
+  glAFilCol=gl.getAttribLocation(glFilProg,'aCol');
+  glUniMVP=gl.getUniformLocation(glFilProg,'uMVP');
+
+  glUniBlurTex=gl.getUniformLocation(glBlurProg,'uTex');
+  glUniBlurDir=gl.getUniformLocation(glBlurProg,'uDir');
+  glUniBlurRes=gl.getUniformLocation(glBlurProg,'uRes');
+  glAQuadPos=gl.getAttribLocation(glBlurProg,'aPos');
+
+  glUniCompScene=gl.getUniformLocation(glCompProg,'uScene');
+  glUniCompBloom=gl.getUniformLocation(glCompProg,'uBloom');
+  glUniCompStr=gl.getUniformLocation(glCompProg,'uBloomStr');
+
+  glFilBuf=gl.createBuffer();
+  glQuadBuf=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,glQuadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+}
+
+function resizeGL(){
+  if(!gl) return;
+  const fw=W*DPR|0, fh=H*DPR|0;
+  const bw=Math.max(1,(fw/4)|0), bh=Math.max(1,(fh/4)|0);
+  if(glSceneFBO){gl.deleteFramebuffer(glSceneFBO.fb);gl.deleteTexture(glSceneFBO.tex);}
+  if(glGlowFBO){gl.deleteFramebuffer(glGlowFBO.fb);gl.deleteTexture(glGlowFBO.tex);}
+  if(glBloomFBO1){gl.deleteFramebuffer(glBloomFBO1.fb);gl.deleteTexture(glBloomFBO1.tex);}
+  if(glBloomFBO2){gl.deleteFramebuffer(glBloomFBO2.fb);gl.deleteTexture(glBloomFBO2.tex);}
+  glSceneFBO=createFBO(fw,fh);
+  glGlowFBO=createFBO(fw,fh);
+  glBloomFBO1=createFBO(bw,bh);
+  glBloomFBO2=createFBO(bw,bh);
+  gl.viewport(0,0,fw,fh);
+}
+
+/* ---- Update horizontal filament positions & colors each frame ---- */
+function updateFilaments(time){
+  const now=performance.now();
+
+  // available notes from current chord + outness
+  const notes=getAvailableNotes();
+  const desired=new Map();
+  for(const n of notes) desired.set(n.midi,n);
+
+  // update existing slots
+  for(const s of hfSlots){
+    const d=desired.get(s.midi);
+    if(d){ s.targetY=midiToScreenY(s.midi); s.targetAlpha=1; s.isTone=d.isTone; desired.delete(s.midi); }
+    else { s.targetAlpha=0; }
+  }
+  // create new slots for notes that weren't already tracked
+  for(const [midi,n] of desired){
+    hfSlots.push({midi, y:midiToScreenY(midi), targetY:midiToScreenY(midi),
+      alpha:0, targetAlpha:1, isTone:n.isTone,
+      pullDisp:0, pullVel:0, pullX:0.5});
+  }
+  // lerp & cull
+  for(let i=hfSlots.length-1;i>=0;i--){
+    const s=hfSlots[i];
+    s.y+=(s.targetY-s.y)*0.08;
+    s.alpha+=(s.targetAlpha-s.alpha)*0.06;
+    if(s.alpha<0.005&&s.targetAlpha===0){ hfSlots.splice(i,1); }
+  }
+  hfSlots.sort((a,b)=>a.midi-b.midi);
+
+  // cull old plucks
+  for(let i=hfPlucks.length-1;i>=0;i--) if(now-hfPlucks[i].t0>3000) hfPlucks.splice(i,1);
+
+  // beat pulse
+  let pulseStr=0;
+  for(const p of pulses) pulseStr+=p.a;
+  pulseStr=Math.min(pulseStr,1.5);
+
+  // lead state
+  const leadActive=lead.pid!==null&&lead.voice;
+
+  // outness visual bias
+  const vizOut=1.0+outness;
+
+  // finger-pull: only sounding filaments get displaced, hold until release
+  const plkNow=performance.now();
+  for(const slot of hfSlots){
+    if(slot.pullDisp===undefined){ slot.pullDisp=0; slot.pullVel=0; slot.pullX=0.5; }
+    const sounding=lead.dragging&&leadActive&&(
+      (lead.voice&&lead.voice.midi===slot.midi)||
+      hfPlucks.some(p=>p.midi===slot.midi&&p.t0>=lead.t0&&(plkNow-p.t0)<1200));
+    if(sounding){
+      const target=lead.y-slot.y;
+      slot.pullDisp+=(target-slot.pullDisp)*0.22;
+      slot.pullX+=(lead.x/W-slot.pullX)*0.18;
+      slot.pullVel=0;
+    } else {
+      slot.pullVel+=(0-slot.pullDisp)*0.08;
+      slot.pullVel*=0.84;
+      slot.pullDisp+=slot.pullVel;
+    }
+  }
+
+  const nFils=Math.min(hfSlots.length,HF_MAX);
+  for(let i=0;i<nFils;i++){
+    const slot=hfSlots[i];
+    const noteHash=((slot.midi*17+5)%37)/37;
+
+    for(let j=0;j<HF_PTS;j++){
+      const idx=(i*HF_PTS+j)*3;
+      const cidx=(i*HF_PTS+j)*4;
+      const x01=j/(HF_PTS-1);
+      const x=x01*W;
+
+      let y=slot.y;
+
+      // noise: organic waviness, NO directional flow (time only in z-axis)
+      const noiseAmp=(2+x01*10)*(0.3+temperature*0.7);
+      const suspDamp=suspended?(1-suspendViz*0.7):1;
+      y+=fbm3(x01*4, slot.midi*0.13, time*0.35, 3)*noiseAmp*suspDamp;
+
+      // finger pull: wide thread-like drape
+      if(Math.abs(slot.pullDisp)>0.3){
+        const xDist=x01-slot.pullX;
+        const env=Math.exp(-xDist*xDist*2.0);
+        y+=slot.pullDisp*env;
+      }
+
+      // pluck displacement
+      for(let pi=0;pi<hfPlucks.length;pi++){
+        const p=hfPlucks[pi];
+        if(p.midi!==slot.midi) continue;
+        const age=(now-p.t0)*0.001;
+        const decay=Math.exp(-age*4.5);
+        const freq=5+(slot.midi-CONFIG.leadLo)*0.12;
+        const wave=Math.sin(age*freq*Math.PI*2);
+        const xDist=x01-p.x01;
+        const env=Math.exp(-xDist*xDist*6);
+        y+=decay*wave*env*p.amp*22*suspDamp;
+      }
+
+      // beat vibration — register-dependent: low notes sway big & slow (kick),
+      // high notes shimmer fast & tight (hat), each note has its own phase
+      if(pulseStr>0.01){
+        const pitchN=(slot.midi-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo);
+        const phase=slot.midi*0.7;
+        const loF=8+pitchN*14, hiF=28+(1-pitchN)*36;
+        const loA=(1-pitchN)*5, hiA=pitchN*2.5;
+        y+=(Math.sin(x01*loF+time*22+phase)*loA
+           +Math.sin(x01*hiF+time*55+phase*1.3)*hiA)*pulseStr*suspDamp;
+      }
+
+      hfPos[idx]=x;
+      hfPos[idx+1]=y;
+      hfPos[idx+2]=0;
+
+      // ---- Color ----
+      let cr=0.91, cg=0.84, cb=0.64;
+
+      // outness tint: warm gold → cool blue-white
+      if(vizOut>1.01){
+        const sh=(vizOut-1)*0.8;
+        cr-=sh*0.35; cg+=sh*0.05; cb+=sh*0.45;
+      }
+
+      // temperature warmth
+      cr+=temperature*0.10; cg-=temperature*0.06; cb-=temperature*0.12;
+
+      // chord tone vs scale tone brightness
+      let alpha;
+      if(slot.isTone){
+        alpha=0.55;
+      } else {
+        alpha=0.28;
+        cr*=0.7; cg*=0.7; cb*=0.7;
+      }
+
+      // per-note brightness variation (deterministic)
+      const filBri=0.75+noteHash*0.5;
+      cr*=filBri; cg*=filBri; cb*=filBri;
+
+      // edge fade at left/right extremes
+      alpha*=Math.min(x01*6,(1-x01)*6,1);
+
+      // slot fade in/out
+      alpha*=slot.alpha;
+
+      // beat pulse glow
+      if(pulseStr>0.01){
+        const boost=1+pulseStr*0.5;
+        cr*=boost; cg*=boost; cb*=boost;
+        alpha+=pulseStr*0.08*slot.alpha;
+      }
+
+      // pluck / sustain brightness — directly in base color (no bloom)
+      for(let pi=0;pi<hfPlucks.length;pi++){
+        const p=hfPlucks[pi];
+        if(p.midi!==slot.midi) continue;
+        const age=(now-p.t0)*0.001;
+        const glow=Math.exp(-age*4.5)*p.amp;
+        const xDist=x01-p.x01;
+        const env=Math.exp(-xDist*xDist*2.5);
+        cr+=glow*env*1.6; cg+=glow*env*1.2; cb+=glow*env*0.6;
+        alpha+=glow*env*1.2;
+      }
+      if(leadActive&&lead.voice&&lead.voice.midi===slot.midi){
+        cr+=1.2; cg+=0.9; cb+=0.4; alpha+=1.0;
+      }
+
+      // lead proximity brightening
+      if(leadActive){
+        const yDist=Math.abs(slot.y-lead.y)/H;
+        const prox=Math.max(0,1-yDist*10);
+        if(prox>0.01){
+          const lb=prox*leadIntensity;
+          cr+=lb*0.20; cg+=lb*0.10; cb+=lb*0.05;
+          alpha+=prox*leadIntensity*0.12;
+        }
+      }
+
+      // suspension dim
+      if(suspendViz>0.01){
+        const dim=1-suspendViz*0.6;
+        cr*=dim; cg*=dim; cb*=dim; alpha*=dim;
+      }
+
+      hfCol[cidx]=Math.min(cr,1);
+      hfCol[cidx+1]=Math.min(cg,1);
+      hfCol[cidx+2]=Math.min(cb,1);
+      hfCol[cidx+3]=clamp(alpha,0,1);
+    }
+  }
+  hfActiveCount=nFils;
+}
+
+/* ---- Render base filaments + glow-only filaments into separate FBOs ---- */
+function renderScene(time){
+  if(!glFilProg) return;
+  const fw=glSceneFBO.w, fh=glSceneFBO.h;
+  const totalVerts=hfActiveCount*HF_PTS;
+  const posBytes=totalVerts*3*4, colBytes=totalVerts*4*4;
+  const ortho=mat4Ortho(0,W,H,0,-1,1);
+
+  // --- Pass 1: base filaments → sceneFBO ---
+  gl.bindFramebuffer(gl.FRAMEBUFFER,glSceneFBO.fb);
+  gl.viewport(0,0,fw,fh);
+  const warm=1-bgTension;
+  gl.clearColor((4+2*warm)/255,(5+warm)/255,(11+4*bgTension)/255,1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  if(totalVerts===0){ gl.bindFramebuffer(gl.FRAMEBUFFER,null); return; }
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+  gl.useProgram(glFilProg);
+  gl.uniformMatrix4fv(glUniMVP,false,ortho);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER,glFilBuf);
+  gl.bufferData(gl.ARRAY_BUFFER,posBytes+colBytes,gl.DYNAMIC_DRAW);
+  gl.bufferSubData(gl.ARRAY_BUFFER,0,hfPos.subarray(0,totalVerts*3));
+  gl.bufferSubData(gl.ARRAY_BUFFER,posBytes,hfCol.subarray(0,totalVerts*4));
+
+  gl.enableVertexAttribArray(glAFilPos);
+  gl.vertexAttribPointer(glAFilPos,3,gl.FLOAT,false,0,0);
+  gl.enableVertexAttribArray(glAFilCol);
+  gl.vertexAttribPointer(glAFilCol,4,gl.FLOAT,false,0,posBytes);
+
+  for(let i=0;i<hfActiveCount;i++) gl.drawArrays(gl.LINE_STRIP,i*HF_PTS,HF_PTS);
+
+  // --- Pass 2: glow-only → glowFBO (bloom source) ---
+  gl.bindFramebuffer(gl.FRAMEBUFFER,glGlowFBO.fb);
+  gl.viewport(0,0,fw,fh);
+  gl.clearColor(0,0,0,1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  // reuse same positions, swap in glow colors
+  gl.bufferSubData(gl.ARRAY_BUFFER,posBytes,hfGlowCol.subarray(0,totalVerts*4));
+  gl.vertexAttribPointer(glAFilCol,4,gl.FLOAT,false,0,posBytes);
+
+  for(let i=0;i<hfActiveCount;i++) gl.drawArrays(gl.LINE_STRIP,i*HF_PTS,HF_PTS);
+
+  gl.disableVertexAttribArray(glAFilPos);
+  gl.disableVertexAttribArray(glAFilCol);
+  gl.disable(gl.BLEND);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+}
+
+/* ---- Bloom post-processing ---- */
+function renderBloom(){
+  if(!glBlurProg) return;
+  const bw=glBloomFBO1.w, bh=glBloomFBO1.h;
+
+  gl.disable(gl.BLEND);
+
+  // Step 1: downsample scene to bloom FBO1 (just blit with the blur shader at 0 offset
+  // actually, let's use the composite shader as a simple passthrough for downsampling)
+  // Simpler: use blur with uDir=0,0 for a passthrough blit
+  gl.useProgram(glBlurProg);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,glBloomFBO1.fb);
+  gl.viewport(0,0,bw,bh);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,glGlowFBO.tex);
+  gl.uniform1i(glUniBlurTex,0);
+  gl.uniform2f(glUniBlurDir,0,0);
+  gl.uniform2f(glUniBlurRes,bw,bh);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER,glQuadBuf);
+  const qPos=gl.getAttribLocation(glBlurProg,'aPos');
+  gl.enableVertexAttribArray(qPos);
+  gl.vertexAttribPointer(qPos,2,gl.FLOAT,false,0,0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // Step 2: horizontal blur — FBO1 -> FBO2
+  gl.bindFramebuffer(gl.FRAMEBUFFER,glBloomFBO2.fb);
+  gl.viewport(0,0,bw,bh);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindTexture(gl.TEXTURE_2D,glBloomFBO1.tex);
+  gl.uniform2f(glUniBlurDir,1,0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // Step 3: vertical blur — FBO2 -> FBO1
+  gl.bindFramebuffer(gl.FRAMEBUFFER,glBloomFBO1.fb);
+  gl.viewport(0,0,bw,bh);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindTexture(gl.TEXTURE_2D,glBloomFBO2.tex);
+  gl.uniform2f(glUniBlurDir,0,1);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // Step 4: second blur pass for wider bloom
+  gl.bindFramebuffer(gl.FRAMEBUFFER,glBloomFBO2.fb);
+  gl.viewport(0,0,bw,bh);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindTexture(gl.TEXTURE_2D,glBloomFBO1.tex);
+  gl.uniform2f(glUniBlurDir,1,0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER,glBloomFBO1.fb);
+  gl.viewport(0,0,bw,bh);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.bindTexture(gl.TEXTURE_2D,glBloomFBO2.tex);
+  gl.uniform2f(glUniBlurDir,0,1);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  gl.disableVertexAttribArray(qPos);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+}
+
+/* ---- Composite scene + bloom to screen ---- */
+function compositeToScreen(){
+  if(!glCompProg) return;
+  const fw=W*DPR|0, fh=H*DPR|0;
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.viewport(0,0,fw,fh);
+  gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.disable(gl.BLEND);
+
+  gl.useProgram(glCompProg);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,glSceneFBO.tex);
+  gl.uniform1i(glUniCompScene,0);
+
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D,glBloomFBO1.tex);
+  gl.uniform1i(glUniCompBloom,1);
+
+  gl.uniform1f(glUniCompStr,0.0);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER,glQuadBuf);
+  const qPos=gl.getAttribLocation(glCompProg,'aPos');
+  gl.enableVertexAttribArray(qPos);
+  gl.vertexAttribPointer(qPos,2,gl.FLOAT,false,0,0);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  gl.disableVertexAttribArray(qPos);
+}
+
+/* ---- Initialize WebGL ---- */
+if(gl) initGL();
+resize();
 
 let bgTension=0.2, bgTensionTarget=0.2;
 const pulses=[];
@@ -2597,97 +3206,32 @@ function frame(){
   const now=performance.now();
   if(AC) updateIntensity();
   bgTension+=(bgTensionTarget-bgTension)*0.01;
-  const warm=1-bgTension;
-  const g=cx.createRadialGradient(W/2,H*0.62,0,W/2,H*0.62,Math.max(W,H)*0.85);
-  g.addColorStop(0,`rgb(${(10+5*warm)|0},${(11+2*warm)|0},${(26+6*bgTension)|0})`);
-  g.addColorStop(1,`rgb(4,5,${(11+4*bgTension)|0})`);
-  cx.fillStyle=g;cx.fillRect(0,0,W,H);
 
-  // temperature — the edges take on heat (warm) driven by playing intensity
-  if(temperature>0.01){
-    const eg=cx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.28,W/2,H/2,Math.max(W,H)*0.72);
-    eg.addColorStop(0,'rgba(0,0,0,0)');
-    eg.addColorStop(1,`rgba(255,${(150-temperature*70)|0},50,${temperature*0.30})`);
-    cx.fillStyle=eg;cx.fillRect(0,0,W,H);
+  // --- WebGL 3D filaments ---
+  if(gl && glFilProg){
+    const t=now*0.001;  // time in seconds
+    updateFilaments(t);
+    renderScene(t);
+    renderBloom();
+    compositeToScreen();
   }
 
-  // outness — cool tension glow (blue-purple) when the left hand morphs the note set
-  const absOut=Math.abs(outness);
-  if(absOut>0.01){
-    const eg2=cx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.25,W/2,H/2,Math.max(W,H)*0.68);
-    eg2.addColorStop(0,'rgba(0,0,0,0)');
-    // sharp (positive) = blue, flat (negative) = purple
-    const r=outness<0?120:40, g2=outness<0?40:80, b=220;
-    eg2.addColorStop(1,`rgba(${r},${g2},${b},${absOut*0.15})`);
-    cx.fillStyle=eg2;cx.fillRect(0,0,W,H);
-  }
+  // --- 2D overlays (on transparent overlay canvas) ---
+  cx.clearRect(0,0,W,H);
 
-  // soft concentric blooms on each beat — emanating from low (a quarter up from the bottom)
-  const bloomY=H*0.75;
+  // decay pulse array (drives filament brightness)
   for(let i=pulses.length-1;i>=0;i--){
     const p=pulses[i];
     p.r+=(p.max-p.r)*0.05; p.a*=0.94;
     if(p.a<0.01){pulses.splice(i,1);continue;}
-    cx.beginPath();cx.arc(W/2,bloomY,p.r,0,7);
-    if(p.amber){                                         // the fill-landing accent — warm, gently brighter than a beat bloom
-      cx.strokeStyle=`rgba(255,201,143,${p.a})`; cx.lineWidth=1.8;
-    }else{
-      const col=lerp(255,180,bgTension)|0, blu=lerp(120,255,bgTension)|0;
-      cx.strokeStyle=`rgba(${col},${lerp(200,212,bgTension)|0},${blu},${p.a})`; cx.lineWidth=1.4;
-    }
-    cx.stroke();
   }
 
-  // lead colour runs hotter (amber→near-red) as leadIntensity rises
-  const lr=255, lg=lerp(220,150,leadIntensity)|0, lb=lerp(150,60,leadIntensity)|0;
-
-  // note-onset rings (an outside note carries its own cyan colour)
-  for(let i=ripples.length-1;i>=0;i--){
-    const r=ripples[i]; r.r+=(r.maxR-r.r)*0.06; r.a*=0.95;
-    if(r.a<0.02){ripples.splice(i,1);continue;}
-    const c=r.col||[lr,lg,lb];
-    cx.beginPath();cx.arc(r.x,r.y,r.r,0,7);
-    cx.strokeStyle=`rgba(${c[0]},${c[1]},${c[2]},${r.a})`;cx.lineWidth=1.5;cx.stroke();
-  }
-
-  // particle burst (the outside flick) — NIGHT LANGUAGE-style scatter
-  for(let i=parts.length-1;i>=0;i--){
-    const p=parts[i]; p.vx*=0.96; p.vy*=0.96; p.x+=p.vx; p.y+=p.vy; p.life-=p.decay;
-    if(p.life<=0){parts.splice(i,1);continue;}
-    cx.beginPath();cx.arc(p.x,p.y,p.r,0,7);
-    cx.fillStyle=`rgba(${p.col[0]},${p.col[1]},${p.col[2]},${p.life*0.85})`;cx.fill();
-  }
-  if(parts.length>600)parts.splice(0,parts.length-600);
-
-  // the sung line — a fading thread, thicker & hotter with intensity. Each stroke
-  // (the active one + any frozen by a new note/flick) ages on its own clock; segments
-  // are only drawn within a stroke, so a fresh note never connects to the old line.
-  cx.lineCap='round'; cx.lineJoin='round';
-  function drawStroke(stroke){
-    for(let i=1;i<stroke.length;i++){
-      const p0=stroke[i-1], p1=stroke[i];
-      const age=(now-p1.t)/1100; if(age>=1) continue;
-      cx.strokeStyle=`rgba(${lr},${lg},${lb},${(1-age)*0.6})`;
-      cx.lineWidth=lerp(1,4,1-age)*lerp(1,1.8,leadIntensity);
-      cx.beginPath();cx.moveTo(p0.x,p0.y);cx.lineTo(p1.x,p1.y);cx.stroke();
-    }
-  }
-  for(let s=oldStrokes.length-1;s>=0;s--){
-    const st=oldStrokes[s];
-    while(st.length && now-st[0].t>1200) st.shift();   // shed faded points
-    if(st.length<2){ oldStrokes.splice(s,1); continue; } // whole stroke gone
-    drawStroke(st);
-  }
-  while(leadStroke.length && now-leadStroke[0].t>1200) leadStroke.shift();
-  if(leadStroke.length>1) drawStroke(leadStroke);
-  // fingertip glow while singing
-  if(lead.pid!==null && lead.voice && leadStroke.length){
-    const tip=leadStroke[leadStroke.length-1];
-    cx.beginPath();cx.arc(tip.x,tip.y,lerp(6,16,leadIntensity),0,7);
-    cx.fillStyle=`rgba(${lr},${lg},${lb},0.85)`;
-    cx.shadowColor='rgba(255,179,92,0.9)'; cx.shadowBlur=lerp(10,28,leadIntensity);
-    cx.fill(); cx.shadowBlur=0;
-  }
+  // decay ripples/particles (arrays still used by code paths, just not drawn)
+  for(let i=ripples.length-1;i>=0;i--){ ripples[i].a*=0.95; if(ripples[i].a<0.02) ripples.splice(i,1); }
+  for(let i=parts.length-1;i>=0;i--){ parts[i].life-=parts[i].decay; if(parts[i].life<=0) parts.splice(i,1); }
+  if(parts.length>200) parts.splice(0,parts.length-200);
+  while(leadStroke.length&&now-leadStroke[0].t>1200) leadStroke.shift();
+  for(let s=oldStrokes.length-1;s>=0;s--){ while(oldStrokes[s].length&&now-oldStrokes[s][0].t>1200) oldStrokes[s].shift(); if(oldStrokes[s].length<2) oldStrokes.splice(s,1); }
 
   // tutorial ghost — demonstrate the narrow-zone left-hand swipes (temp / scrub)
   drawTutorialGhost(now);
@@ -2697,43 +3241,35 @@ function frame(){
   if(suspendViz>0.01){ cx.fillStyle=`rgba(2,3,9,${suspendViz*0.55})`; cx.fillRect(0,0,W,H); }
 
   // progression SCRUB selector — the chosen name follows the finger, just above it
-  // (same font/size as the debug HUD)
-  if(selectorActive && selectorIndex>=0){                 // no name in the dead-zone margins
+  if(selectorActive && selectorIndex>=0){
     cx.font='10px ui-monospace,Menlo,monospace'; cx.textAlign='center';
-    // the current progression is dimmed (selecting it changes nothing)
     cx.fillStyle = selectorIndex===progIdx ? 'rgba(232,213,163,0.38)' : 'rgba(232,213,163,0.9)';
     cx.fillText(PROGRESSIONS[selectorIndex].name, left.x, left.y-60);
     cx.textAlign='start';
   }
 
-  // transition gauge — ONE fill from the commit until the dominant ends (the moment the
-  // destination progression arrives). Driven by wall-clock (now) so it fills perfectly smoothly,
-  // instead of stepping with the beat scheduler.
+  // transition gauge
   if(gaugeWallEnd>gaugeWallStart){
     const g=clamp((now-gaugeWallStart)/(gaugeWallEnd-gaugeWallStart),0,1);
     cx.fillStyle='rgba(232,213,163,0.55)'; cx.fillRect(0,H-4,W*g,4);
     if(g>=1) gaugeWallStart=gaugeWallEnd=0;
   }
 
-  // fill countdown — a warm bar (just above the harmony gauge) filling toward the beat the
-  // down-flick fill lands on. It reaches the right edge exactly as the fill sounds.
+  // fill countdown
   if(fillManual && fillGaugeEnd>fillGaugeStart && now<fillGaugeEnd){
     const g=clamp((now-fillGaugeStart)/(fillGaugeEnd-fillGaugeStart),0,1);
     cx.fillStyle='rgba(255,190,120,0.6)'; cx.fillRect(0,H-9,W*g,3);
   }
 
-  // (recording countdown bar removed — gear dot blink handles countdown feedback)
-
-  // discrete event flash — warm for a HIT, pale cyan for a PUNCH (a FILL has no flash; it
-  // uses the countdown bar + the amber landing bloom instead)
+  // discrete event flash
   if(flash.a>0.01){
     flash.a*=0.9;
-    cx.fillStyle = flash.kind==='hit' ? `rgba(255,232,184,${flash.a})`   // warm lift (HIT)
-                 : `rgba(150,210,235,${flash.a})`;                       // pale cyan (tap PUNCH)
+    cx.fillStyle = flash.kind==='hit' ? `rgba(255,232,184,${flash.a})`
+                 : `rgba(150,210,235,${flash.a})`;
     cx.fillRect(0,0,W,H);
   }
 
-  // debug HUD — last gesture + the resulting state it changed
+  // debug HUD
   if(CONFIG.debug && dbgEl){
     const leadNote = lastLeadMidi!==null ? midiName(lastLeadMidi) : '—';
     const fillRem = fillAtBeat>=0 ? Math.max(0,fillAtBeat-Math.floor(beatPos())) : -1;
