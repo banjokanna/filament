@@ -60,16 +60,16 @@
   }
   #settings{
     position:fixed;inset:0;z-index:9;display:none;
-    flex-direction:column;align-items:center;justify-content:center;gap:18px;
+    flex-direction:column;align-items:center;justify-content:center;gap:17px;
     background:transparent;
-    color:var(--gold);text-align:center;padding:112px 32px 32px;
+    color:var(--gold);text-align:center;padding:114px 32px 32px;overflow-y:auto;
   }
   #settings.open{display:flex;}
   .srow{
     display:flex;align-items:center;justify-content:space-between;
     width:min(82vw,360px);gap:24px;
     font-size:11px;letter-spacing:.18em;color:rgba(232,213,163,.85);
-    padding:7px 2px;
+    padding:2px 2px;
   }
   /* all right-side controls share one width so they line up (matches the EN|JP segment) */
   .srow .tog,.srow .seg{box-sizing:border-box;width:156px;}
@@ -236,7 +236,9 @@
   <div class="srow"><span>Prog</span><span class="pgrid" id="prog-grid"></span></div>
   <div class="srow"><span>Voice</span><span class="seg"><span class="opt on" id="voice-0">A</span><span class="opt" id="voice-1">B</span><span class="opt" id="voice-2">C</span></span></div>
   <div class="srow"><span>Chord</span><span class="seg"><span class="opt on" id="chord-pad">Pad</span><span class="opt on" id="chord-piano">Piano</span></span></div>
+  <div class="srow"><span>Snap</span><span class="seg"><span class="opt" id="snap-tight">Tight</span><span class="opt" id="snap-mid">Mid</span><span class="opt on" id="snap-loose">Loose</span></span></div>
   <div class="srow"><span>HUD</span><span class="seg"><span class="opt on" id="hud-on">ON</span><span class="opt" id="hud-off">OFF</span></span></div>
+  <div class="srow"><span>Guide</span><span class="seg"><span class="opt on" id="guide-on">ON</span><span class="opt" id="guide-off">OFF</span></span></div>
   <div class="srow"><span>Rec</span><span class="seg"><span class="opt" id="rec-btn">● REC</span><span class="opt off" id="rec-wav">WAV</span><span class="opt off" id="rec-mid">MIDI</span></span></div>
   <div class="srow-hint">Use earphones for screen recording</div>
 </div>
@@ -331,13 +333,13 @@ const CONFIG = {
 
   // ---- RightHand — the lead is "声" (a voice): sustained, gliding ----
   // (per-voice tone — osc/filter/vibrato/attack/release/saturation/sends — lives in TIMBRES)
-  leadLo: 38, leadHi: 96,       // playable midi range mapped to the vertical axis
+  leadLo: 44, leadHi: 90,       // playable midi range mapped to the vertical axis
   leadMaxVoices: 6,             // cap on overlapping lead voices (rapid-tap tails) — steal oldest
                                 //    (lead is monophonic; normal play never reaches this — transparent)
   leadPortamento: 0.06,         // glide time-constant for slides (legato)
   leadLeapSemitones: 3,         // a jump of >= this, made fast, re-articulates…
   leadLeapSpeed: 0.30,          // px/ms — …above this finger speed (else it glides)
-  chordToneWeight: 2.0,         // snap bias toward chord tones (vs other scale notes)
+  chordToneWeight: 1.0,         // snap bias toward chord tones (vs other scale notes)
   snapWaver: 0.5,               // tiny random humanisation in the snap choice
 
   // ---- leadIntensity — finger speed + register (+ pressure), 0..1 → BandBrain ----
@@ -1936,7 +1938,7 @@ function morphedScale(){
     tones: leadChord.tones.map(n=>(n+shift+120)%12),
   };
 }
-function snapToAvailable(target){
+function snapToAvailable(target,tonesOnly){
   const lo=CONFIG.leadLo, hi=CONFIG.leadHi;
   const {scale,tones} = morphedScale();
   const inScale = m=>scale.includes(((m%12)+12)%12);
@@ -1945,6 +1947,7 @@ function snapToAvailable(target){
   for(let m=Math.round(target)-4;m<=Math.round(target)+4;m++){
     if(m<lo||m>hi) continue;
     if(!inScale(m)) continue;
+    if(tonesOnly&&!isTone(m)) continue;
     let s=-Math.abs(target-m)*1.1;
     if(isTone(m)) s+=CONFIG.chordToneWeight;
     s+=Math.random()*CONFIG.snapWaver;
@@ -2080,7 +2083,7 @@ function leadMove(e){
   pushTrail(e.clientX,e.clientY);                          // normal play only — the sung line
 
   const y01=clamp(e.clientY/H,0,1), x01=clamp(e.clientX/W,0,1);
-  const midi=snapToAvailable(yToMidi(y01));
+  const midi=snapToAvailable(yToMidi(y01),true);
   lastLeadMidi=midi;
   if(midi!==lead.voice.midi){
     tutorialNotify('voice');
@@ -2092,7 +2095,7 @@ function leadMove(e){
       midiLog(0,0xE0,0,64);
       REC.leadBase=midi;
       midiLog(0,0x90,midi,100);
-      rearticulateLead(lead.voice,midi,x01); ripple(x01,y01,midi, outness!==0&&!inScaleLead(midi)?OUT_COL:null);
+      rearticulateLead(lead.voice,midi,x01); ripple(x01,clamp((CONFIG.leadHi-midi)/(CONFIG.leadHi-CONFIG.leadLo),0,1),midi, outness!==0&&!inScaleLead(midi)?OUT_COL:null);
     } else {
       // MIDI: legato glide — pitch bend, but rearticulate if drift exceeds 4 semitones
       // to prevent abnormally long notes during continuous sweeps
@@ -2337,7 +2340,7 @@ function leftMove(e){
     // if a lead voice is sustaining, glide it to the morphed pitch
     if(outness!==prev && lead.voice && lead.pid!==null){
       const y01=clamp(lead.y/H,0,1);
-      const midi=snapToAvailable(yToMidi(y01));
+      const midi=snapToAvailable(yToMidi(y01),true);
       if(midi!==lead.voice.midi){
         const f=mtof(midi), t=AC.currentTime;
         lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
@@ -2384,7 +2387,7 @@ function leftUp(e){
   if(outness!==0 && lead.voice && lead.pid!==null){
     outness=0;
     const y01=clamp(lead.y/H,0,1);
-    const midi=snapToAvailable(yToMidi(y01));
+    const midi=snapToAvailable(yToMidi(y01),true);
     if(midi!==lead.voice.midi){
       const f=mtof(midi), t=AC.currentTime;
       lead.voice.o1.frequency.setTargetAtTime(f,t,0.03);
@@ -2622,6 +2625,44 @@ function frame(){
     cx.fillStyle=eg2;cx.fillRect(0,0,W,H);
   }
 
+  // root octave guide lines — crossfade centered on leadChord change
+  if(guideLines){
+  const bandRoot=chord.tones[0];
+  if(!frame._rl) frame._rl={prev:bandRoot, oldRoot:null, oldScale:null, fade:1, t0:0, dur:1};
+  const rl=frame._rl;
+  if(bandRoot!==rl.prev){
+    rl.oldRoot=rl.prev; rl.oldScale=leadChord.scale.slice(); rl.oldTones=leadChord.tones.slice(); rl.prev=bandRoot; rl.t0=now;
+    const lagBeats=(CONFIG.beatsPerBar-CONFIG.grooveOffset)%CONFIG.beatsPerBar
+                  +(style.leadLagBars||0)*CONFIG.beatsPerBar;
+    rl.dur=Math.max(1.2*lagBeats*(Transport.beatDur||0.5)*1000, 500);
+    rl.fade=0;
+  }
+  if(rl.t0>0&&rl.dur>0) rl.fade=clamp((now-rl.t0)/rl.dur,0,1);
+  cx.lineWidth=0.5;
+  for(let m=CONFIG.leadLo;m<=CONFIG.leadHi;m++){
+    const pc=((m%12)+12)%12;
+    let aNew=0, aOld=0;
+    if(pc===bandRoot) aNew=0.6;
+    else if(chord.tones.includes(pc)) aNew=0.2;
+    else if(chord.scale.includes(pc)) aNew=0.0;
+    if(rl.fade<1&&rl.oldRoot!==null){
+      if(pc===rl.oldRoot) aOld=0.6;
+      else if(rl.oldTones&&rl.oldTones.includes(pc)) aOld=0.2;
+      else if(rl.oldScale&&rl.oldScale.includes(pc)) aOld=0.0;
+    }
+    const a=aNew*rl.fade+aOld*(1-rl.fade);
+    if(a<0.005) continue;
+    const ry=H*(1-(m-CONFIG.leadLo)/(CONFIG.leadHi-CONFIG.leadLo));
+    const noteNames=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const lblW=22;
+    cx.strokeStyle=`rgba(232,213,163,${a.toFixed(3)})`;
+    cx.beginPath();cx.moveTo(lblW,ry);cx.lineTo(W,ry);cx.stroke();
+    cx.font='10px monospace';cx.textAlign='left';cx.textBaseline='middle';
+    cx.fillStyle=`rgba(232,213,163,${(a*0.8).toFixed(3)})`;
+    cx.fillText(noteNames[pc],6,ry);
+  }
+  }
+
   // soft concentric blooms on each beat — emanating from low (a quarter up from the bottom)
   const bloomY=H*0.75;
   for(let i=pulses.length-1;i>=0;i--){
@@ -2822,12 +2863,17 @@ function syncHud(){
 function settingsOpen(){ return settingsEl.classList.contains('open'); }
 function openSettings(){
   if(tutActive) endTutorial();
-  syncHud(); syncBpm(); syncProg(); syncRec(); settingsEl.classList.add('open');
+  syncHud(); syncGuide(); syncSnap(); syncBpm(); syncProg(); syncRec(); settingsEl.classList.add('open');
 }
 function closeSettings(){ settingsEl.classList.remove('open'); }
 document.getElementById('gear').addEventListener('pointerdown',e=>{e.stopPropagation();e.preventDefault();openSettings();});
 hudOn.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=true; syncHud(); });
 hudOff.addEventListener('click',e=>{ e.stopPropagation(); CONFIG.debug=false; syncHud(); });
+let guideLines=false;
+const guideOn=document.getElementById('guide-on'), guideOff=document.getElementById('guide-off');
+function syncGuide(){ guideOn.classList.toggle('on',guideLines); guideOff.classList.toggle('on',!guideLines); }
+guideOn.addEventListener('click',e=>{ e.stopPropagation(); guideLines=true; syncGuide(); });
+guideOff.addEventListener('click',e=>{ e.stopPropagation(); guideLines=false; syncGuide(); });
 // Voice timbre — a three-button A | B | C selector; applies live so you can audition
 const voiceOpts=[document.getElementById('voice-0'),document.getElementById('voice-1'),document.getElementById('voice-2')];
 function syncVoice(){ voiceOpts.forEach((el,i)=>el.classList.toggle('on', i===timbreIdx)); }
@@ -2986,6 +3032,12 @@ chordPianoBtn.addEventListener('click',e=>{
   e.stopPropagation(); usePiano=!usePiano;
   syncChord();
 });
+// Snap toggle — Tight (chordToneWeight 2.0, swipe=all) vs Loose (1.0, swipe=chord-tones-only)
+let snapMode='loose';
+const snapBtns={tight:document.getElementById('snap-tight'),mid:document.getElementById('snap-mid'),loose:document.getElementById('snap-loose')};
+const snapWeights={tight:2.0,mid:1.5,loose:1.0};
+function syncSnap(){ for(const k in snapBtns) snapBtns[k].classList.toggle('on',k===snapMode); CONFIG.chordToneWeight=snapWeights[snapMode]; }
+for(const k in snapBtns) snapBtns[k].addEventListener('click',(e=>{ e.stopPropagation(); snapMode=k; syncSnap(); }).bind(null));
 // Rec buttons — REC starts countdown (or stops), Save downloads WAV+MIDI
 recBtn.addEventListener('click',e=>{
   e.stopPropagation();
@@ -3001,7 +3053,7 @@ function syncRec(){
   recWav.classList.toggle('off', REC.state!=='stopped');
   recMid.classList.toggle('off', REC.state!=='stopped');
 }
-syncHud(); syncVoice(); syncStyle(); syncProg(); syncChord();   // initial state
+syncHud(); syncVoice(); syncStyle(); syncProg(); syncChord(); syncSnap();   // initial state
 
 /* ---------------- interactive tutorial ----------------
    Launched from the settings panel. A top card names a gesture and waits; the band
